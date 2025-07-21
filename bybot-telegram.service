@@ -1,0 +1,13 @@
+[Unit]
+Description=BYBOT Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=mikevance
+WorkingDirectory=/home/mikevance/bots/bybot
+ExecStart=/home/mikevance/bots/venv/bin/python3.12 -m bot.services.telegram_bot
+Restart=always
+
+[Install]
+WantedBy=multi-user.target 

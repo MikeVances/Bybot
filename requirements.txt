@@ -1,0 +1,7 @@
+pybit
+python-telegram-bot
+python-dotenv>=0.19
+pandas 
+click>=8.0
+requests>=2.26
+websockets>=11.0

@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Environment
+.env
+.env.local
+.env*.local
+config.py
+config_*.py
+/secrets/
+
+# Data and logs
+/data/
+/logs/
+*.log
+*.csv
+*.json
+*.parquet
+*.feather
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build and distribution
+/dist/
+/build/
+/out/
+*.exe
+*.msi
+*.dmg
+
+# Jupyter Notebook
+*.ipynb
+
+# Backtesting artifacts
+/backtest_results/
+/optimization/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Virtual environment
+venv/
+.venv/
+env/
+ENV/
+
+# Test coverage
+.coverage
+htmlcov/
+
+# Debug
+debug_*.py
+/profile/
