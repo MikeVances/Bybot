@@ -1,12 +1,12 @@
 import unittest
 from unittest.mock import patch
-from bot.exchange.bybit_api import TradingBot
+from bot.exchange.api_adapter import create_trading_bot_adapter
 
 class TestTradingBotPositionInfo(unittest.TestCase):
     def setUp(self):
-        self.bot = TradingBot(symbol="BTCUSDT")
+        self.bot = create_trading_bot_adapter(symbol="BTCUSDT", use_v5=True, testnet=True)
 
-    @patch.object(TradingBot, 'get_positions')
+    @patch.object(create_trading_bot_adapter, 'get_positions')
     def test_update_position_info_with_position(self, mock_get_positions):
         # Мокаем ответ Bybit API с открытой позицией
         mock_get_positions.return_value = {
@@ -24,7 +24,7 @@ class TestTradingBotPositionInfo(unittest.TestCase):
         self.assertEqual(self.bot.entry_price, 32000.0)
         self.assertEqual(self.bot.position_side, 'Buy')
 
-    @patch.object(TradingBot, 'get_positions')
+    @patch.object(create_trading_bot_adapter, 'get_positions')
     def test_update_position_info_no_position(self, mock_get_positions):
         # Мокаем ответ Bybit API без открытых позиций
         mock_get_positions.return_value = {

@@ -1,4 +1,10 @@
-strategy_01
-strategy_02
-strategy_03
-strategy_04
+# Активные стратегии для торгового бота
+# Каждая строка - одна стратегия
+# Строки, начинающиеся с # - комментарии
+
+volume_vwap_default
+cumdelta_sr_default
+multitf_volume_default
+volume_vwap_conservative
+fibonacci_rsi_default
+range_trading_default 

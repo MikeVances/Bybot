@@ -1,9 +1,9 @@
 import unittest
-from bot.exchange.bybit_api import TradingBot
+from bot.exchange.api_adapter import create_trading_bot_adapter
 
 class TestOrderPlacement(unittest.TestCase):
     def setUp(self):
-        self.bot = TradingBot(symbol="BTCUSDT")
+        self.bot = create_trading_bot_adapter(symbol="BTCUSDT", use_v5=True, testnet=True)
 
     def test_create_order(self):
         # Получаем актуальную цену

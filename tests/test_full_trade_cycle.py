@@ -5,7 +5,7 @@ import csv
 import requests
 import hmac
 import hashlib
-from bot.exchange.bybit_api import TradingBot
+from bot.exchange.api_adapter import create_trading_bot_adapter
 from config import BYBIT_API_KEY, BYBIT_API_SECRET, BYBIT_API_URL
 
 def manual_close_position(api_key, api_secret, symbol, qty, side, position_idx=0):
@@ -39,7 +39,7 @@ class TestFullTradeCycle(unittest.TestCase):
     """
     def setUp(self):
         self.symbol = "BTCUSDT"
-        self.bot = TradingBot(symbol=self.symbol)
+        self.bot = create_trading_bot_adapter(symbol=self.symbol, use_v5=True, testnet=True)
         self.usdt_amount = 1000
 
     def test_full_trade_cycle(self):

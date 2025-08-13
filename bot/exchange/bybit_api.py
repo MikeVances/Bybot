@@ -13,9 +13,9 @@ import csv
 from datetime import datetime
 from .endpoints import Position, Trade, Account, Market
 
-# Настройка логгирования
-logging.basicConfig(filename='bot.log', level=logging.INFO, 
-                   format='%(asctime)s - %(levelname)s - %(message)s')
+# Настройка логгирования - убрано дублирование, основная настройка в main.py
+# logging.basicConfig(filename='bot.log', level=logging.INFO, 
+#                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 class BybitAPI:
     def __init__(self):
@@ -55,7 +55,7 @@ class BybitAPI:
         params["api_key"] = self.api_key
         params["timestamp"] = str(int(time.time() * 1000))
         params["sign"] = self._sign_request(params)
-
+        
         for attempt in range(self.max_retries):
             try:
                 # Универсальный запрос с поддержкой таймаута
@@ -137,21 +137,45 @@ class BybitAPI:
                 
                 # Если ордер создан успешно и нужно установить SL/TP, делаем это отдельно
                 if (stop_loss is not None or take_profit is not None) and not reduce_only:
-                    # Ждем немного, чтобы позиция открылась
+                    # Ждем и проверяем, что позиция действительно открылась
                     import time
-                    time.sleep(1)
-                    
-                    # Устанавливаем SL/TP через отдельный запрос
-                    sl_tp_response = self.set_trading_stop(
-                        symbol=symbol,
-                        stop_loss=stop_loss,
-                        take_profit=take_profit
-                    )
-                    
-                    if sl_tp_response:
-                        self.logger.info(f"SL/TP set successfully: {sl_tp_response['result']}")
-                    else:
-                        self.logger.warning("Failed to set SL/TP, but order was created")
+                    max_attempts = 5
+                    for attempt in range(max_attempts):
+                        time.sleep(2)  # Увеличиваем задержку до 2 секунд
+                        
+                        # Проверяем, что позиция открылась
+                        positions = self.get_positions(symbol)
+                        if positions and positions.get('result') and positions['result'].get('list'):
+                            for pos in positions['result']['list']:
+                                if float(pos.get('size', 0)) > 0:
+                                    self.logger.info(f"Position confirmed, setting SL/TP (attempt {attempt + 1})")
+                                    
+                                    # Устанавливаем SL/TP через отдельный запрос
+                                    sl_tp_response = self.set_trading_stop(
+                                        symbol=symbol,
+                                        stop_loss=stop_loss,
+                                        take_profit=take_profit
+                                    )
+                                    
+                                    if sl_tp_response:
+                                        self.logger.info(f"SL/TP set successfully: {sl_tp_response['result']}")
+                                    else:
+                                        self.logger.warning("Failed to set SL/TP, but order was created")
+                                    break
+                            else:
+                                if attempt < max_attempts - 1:
+                                    self.logger.info(f"Position not yet opened, waiting... (attempt {attempt + 1})")
+                                    continue
+                                else:
+                                    self.logger.error("Position not opened after all attempts")
+                                    break
+                        else:
+                            if attempt < max_attempts - 1:
+                                self.logger.info(f"Could not get positions, waiting... (attempt {attempt + 1})")
+                                continue
+                            else:
+                                self.logger.error("Could not get positions after all attempts")
+                                break
                 
                 return response
             else:
@@ -271,7 +295,7 @@ class BybitAPI:
                 comment
             ])
 
-    def set_trading_stop(self, symbol, stop_loss=None, take_profit=None, sl_trigger_by="LastPrice", tp_trigger_by="LastPrice"):
+    def set_trading_stop(self, symbol, stop_loss=None, take_profit=None, sl_trigger_by="MarkPrice", tp_trigger_by="MarkPrice"):
         """
         Устанавливает стоп-лосс и/или тейк-профит для открытой позиции.
         :param symbol: Тикер (например, BTCUSDT)
@@ -287,13 +311,34 @@ class BybitAPI:
             "accountType": "UNIFIED"
         }
         
+        # Проверяем и форматируем цены
         if stop_loss is not None:
-            params["stopLoss"] = f"{float(stop_loss):.2f}"
-            params["slTriggerBy"] = sl_trigger_by
+            try:
+                stop_loss_float = float(stop_loss)
+                # Для BTCUSDT используем 1 знак после запятой, для других - 2
+                if symbol == "BTCUSDT":
+                    params["stopLoss"] = f"{stop_loss_float:.1f}"
+                else:
+                    params["stopLoss"] = f"{stop_loss_float:.2f}"
+                params["slTriggerBy"] = sl_trigger_by
+                self.logger.info(f"Setting stop loss: {params['stopLoss']} (trigger: {sl_trigger_by})")
+            except (ValueError, TypeError) as e:
+                self.logger.error(f"Invalid stop loss value: {stop_loss}, error: {e}")
+                return None
             
         if take_profit is not None:
-            params["takeProfit"] = f"{float(take_profit):.2f}"
-            params["tpTriggerBy"] = tp_trigger_by
+            try:
+                take_profit_float = float(take_profit)
+                # Для BTCUSDT используем 1 знак после запятой, для других - 2
+                if symbol == "BTCUSDT":
+                    params["takeProfit"] = f"{take_profit_float:.1f}"
+                else:
+                    params["takeProfit"] = f"{take_profit_float:.2f}"
+                params["tpTriggerBy"] = tp_trigger_by
+                self.logger.info(f"Setting take profit: {params['takeProfit']} (trigger: {tp_trigger_by})")
+            except (ValueError, TypeError) as e:
+                self.logger.error(f"Invalid take profit value: {take_profit}, error: {e}")
+                return None
             
         if not params.get("stopLoss") and not params.get("takeProfit"):
             self.logger.warning("No stop loss or take profit provided")
@@ -301,7 +346,7 @@ class BybitAPI:
             
         response = self._send_request("POST", Position.SET_TRADING_STOP, params)
         if response and response.get('retCode') == 0:
-            self.logger.info(f"Trading stop set: {response['result']}")
+            self.logger.info(f"Trading stop set successfully: {response['result']}")
             return response
         else:
             error_msg = response.get('retMsg', 'Unknown error') if response else 'No response from API'
@@ -564,8 +609,33 @@ class BybitAPI:
     
 
 class TradingBot(BybitAPI):
-    def __init__(self, symbol="BTCUSDT"):
-        super().__init__()
+    def __init__(self, symbol="BTCUSDT", api_key=None, api_secret=None, uid=None):
+        # Если переданы API ключи, используем их, иначе используем дефолтные
+        if api_key and api_secret:
+            self.base_url = BYBIT_API_URL
+            self.api_key = api_key
+            self.api_secret = api_secret
+            self.session = requests.Session()
+            self.session.headers.update({"Content-Type": "application/json"})
+            
+            # Улучшенное логирование: отдельный логгер для BybitAPI
+            log_dir = 'data/logs'
+            os.makedirs(log_dir, exist_ok=True)
+            self.logger = logging.getLogger('bybit_api')
+            self.logger.setLevel(logging.INFO)
+            handler = logging.FileHandler(os.path.join(log_dir, 'bybit_api.log'))
+            handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            if not self.logger.hasHandlers():
+                self.logger.addHandler(handler)
+            self._log_handler = handler  # Сохраняем для закрытия
+            
+            # Таймауты и ретраи
+            self.timeout = 10  # секунд
+            self.max_retries = 3
+        else:
+            # Используем дефолтные ключи
+            super().__init__()
+        
         self.symbol = symbol
         self.position_size = 0.0
         self.entry_price = 0.0
@@ -634,6 +704,28 @@ class TradingBot(BybitAPI):
         
         self.logger.info(f"Executing {signal} signal with {qty} USDT")
         self.create_order(self.symbol, signal, "Market", qty)
+
+    def log_signal(self, strategy_name, signal_type, market_data, indicators=None, comment=""):
+        """
+        Логирование сигналов стратегий для анализа и отладки.
+        :param strategy_name: Название стратегии
+        :param signal_type: Тип сигнала (BUY, SELL, EXIT)
+        :param market_data: Рыночные данные
+        :param indicators: Индикаторы (опционально)
+        :param comment: Комментарий (опционально)
+        """
+        try:
+            self.log_strategy_signal(
+                strategy=strategy_name,
+                symbol=self.symbol,
+                signal=signal_type,
+                market_data=market_data,
+                indicators=indicators or {},
+                comment=comment
+            )
+            self.logger.info(f"Signal logged: {strategy_name} - {signal_type}")
+        except Exception as e:
+            self.logger.error(f"Ошибка логирования: {str(e)}")
 
 if __name__ == "__main__":
     bot = TradingBot()

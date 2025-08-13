@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# Перезапуск сервисов bybot-trading и bybot-telegram
+# Перезапуск сервиса bybot-trading (Telegram бот интегрирован в main.py)
 
 sudo systemctl restart bybot-trading.service
-sudo systemctl restart bybot-telegram.service
 
-echo "Сервисы bybot-trading и bybot-telegram перезапущены." 
+echo "Сервис bybot-trading перезапущен (Telegram бот интегрирован)." 
