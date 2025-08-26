@@ -62,3 +62,23 @@ htmlcov/
 # Debug
 debug_*.py
 /profile/
+
+# Secrets and certificates
+*.key
+*.pem
+*.crt
+
+# Machine learning models
+/models/
+*.h5
+*.pt
+*.pkl
+*.onnx
+
+# Databases
+*.sqlite3
+*.db
+
+# Docker artifacts
+docker-compose.override.yml
+*.pid
