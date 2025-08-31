@@ -24,8 +24,12 @@ class NeuralIntegration:
     """
     
     def __init__(self, risk_manager=None):
-        # Инициализация нейронной сети
-        self.neural_trader = NeuralTrader()
+        # 📈 Инициализация ОПТИМИЗИРОВАННОЙ нейронной сети (152 входа)
+        self.neural_trader = NeuralTrader(
+            input_size=152,  # 📈 ОПТИМИЗИРОВАНО: 3x больше features!
+            hidden_size=64,  # 📈 Пропорционально увеличено
+            dropout_rate=0.15  # 📈 Оптимизировано для большей сети
+        )
         self.risk_manager = risk_manager
         self.logger = logging.getLogger('neural_integration')
         

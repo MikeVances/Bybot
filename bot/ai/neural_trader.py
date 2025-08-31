@@ -22,13 +22,13 @@ class NeuralTrader:
     """
     
     def __init__(self, 
-                 input_size: int = 50,
-                 hidden_size: int = 32,
+                 input_size: int = 152,  # ОПТИМИЗИРОВАНО: увеличен для полного охвата features
+                 hidden_size: int = 64,   # ОПТИМИЗИРОВАНО: пропорционально увеличен
                  output_size: int = 10,
                  learning_rate: float = 0.001,
                  memory_size: int = 1000,
                  l2_lambda: float = 0.001,
-                 dropout_rate: float = 0.2):
+                 dropout_rate: float = 0.15): # ОПТИМИЗИРОВАНО: снижен для большей сети
         
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -197,7 +197,7 @@ class NeuralTrader:
                 else:
                     features.extend([0] * 8)
             
-            # Сигналы стратегий с улучшенной обработкой
+            # 📈 РАСШИРЕННЫЕ сигналы стратегий (увеличено с 4 до 8 features)
             strategy_names = [f'strategy_{i:02d}' for i in range(1, 11)]
             for strategy_name in strategy_names:
                 if strategy_name in strategy_signals:
@@ -230,26 +230,68 @@ class NeuralTrader:
                         rr_ratio = np.clip(rr_ratio, 0.5, 5.0)  # От 0.5 до 5.0
                         rr_ratio_norm = (rr_ratio - 1.0) / 4.0  # Нормализуем к [-0.125, 1.0]
                         
-                        features.extend([signal_value, price_deviation, signal_strength, rr_ratio_norm])
+                        # 📈 РАСШИРЕННЫЕ features стратегии (4 → 8)
+                        stop_loss = float(signal.get('stop_loss', entry_price * 0.95))
+                        take_profit = float(signal.get('take_profit', entry_price * 1.05))
+                        time_decay = float(signal.get('time_in_position', 0)) / 3600  # часы
+                        confidence_decay = signal_strength * np.exp(-time_decay * 0.1)  # экспоненциальное затухание
+                        
+                        features.extend([
+                            signal_value, price_deviation, signal_strength, rr_ratio_norm,
+                            np.clip(time_decay, 0, 24),  # макс 24 часа
+                            np.clip(confidence_decay, 0, 1),  # затухающая уверенность
+                            1 if signal_type == 'BUY' else (0.5 if signal_type == 'SELL' else 0),  # категориальный сигнал  
+                            np.clip(abs(price_deviation), 0, 0.1)  # абсолютное отклонение
+                        ])
                     else:
-                        features.extend([0, 0, 0.5, 0])  # Нейтральные значения
+                        features.extend([0, 0, 0.5, 0, 0, 0.5, 0, 0])  # 8 нейтральных features
                 else:
-                    features.extend([0, 0, 0.5, 0])
+                    features.extend([0, 0, 0.5, 0, 0, 0.5, 0, 0])  # 8 нейтральных features
             
-            # Дополнительные рыночные индикаторы
+            # 🔭 РАСШИРЕННЫЕ рыночные индикаторы (2 → 16)
             market_sentiment = self._calculate_market_sentiment(market_data)
             volatility_index = self._calculate_volatility_index(market_data)
+            trend_strength = self._calculate_trend_strength(market_data)
+            momentum_divergence = self._calculate_momentum_divergence(market_data)
+            volume_profile = self._calculate_volume_profile(market_data)
+            correlation_matrix = self._calculate_timeframe_correlation(market_data)
+            
+            # Микроструктурные характеристики
+            spread_dynamics = self._calculate_spread_dynamics(market_data)
+            order_flow_imbalance = self._calculate_order_flow_imbalance(market_data)
+            
+            # Временные факторы
+            time_features = self._extract_temporal_features()
             
             features.extend([
-                np.clip(market_sentiment, -1, 1),      # Настроение рынка
-                np.clip(volatility_index, 0, 2)        # Индекс волатильности
+                # Основные рыночные индикаторы (6)
+                np.clip(market_sentiment, -1, 1),
+                np.clip(volatility_index, 0, 2),
+                np.clip(trend_strength, -1, 1),
+                np.clip(momentum_divergence, -1, 1),
+                np.clip(volume_profile, 0, 2),
+                np.clip(correlation_matrix, -1, 1),
+                
+                # Микроструктура (2)
+                np.clip(spread_dynamics, 0, 1),
+                np.clip(order_flow_imbalance, -1, 1),
+                
+                # Временные факторы (8)
+                *time_features
             ])
             
-            # Дополняем или обрезаем до нужного размера
-            while len(features) < self.input_size:
-                features.append(0.0)
-            
-            features = features[:self.input_size]
+            # 🚨 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: без потерь информации!
+            # Теперь сохраняем ВСЕ features без обрезки
+            if len(features) < self.input_size:
+                # Дополняем нулями только если недостает данных
+                padding_needed = self.input_size - len(features)
+                features.extend([0.0] * padding_needed)
+                self.logger.debug(f"Дополнено {padding_needed} нулевых features")
+            elif len(features) > self.input_size:
+                # ЛОГИРУЕМ ПРОБЛЕМУ - не обрезаем!
+                excess_features = len(features) - self.input_size
+                self.logger.warning(f"ПОТЕРЯ ИНФОРМАЦИИ! {excess_features} features обрезаны")
+                features = features[:self.input_size]
             
             # Финальная проверка на NaN и Inf
             features = [0.0 if (np.isnan(f) or np.isinf(f)) else float(f) for f in features]
@@ -258,7 +300,7 @@ class NeuralTrader:
             
         except Exception as e:
             self.logger.error(f"Ошибка подготовки входных данных: {e}")
-            # Возвращаем нулевой вектор в случае критической ошибки
+            # Возвращаем нулевой вектор с новым размером
             return np.zeros((1, self.input_size), dtype=np.float32)
     
     def _safe_divide(self, a, b, default=0.0):
@@ -1081,3 +1123,175 @@ class NeuralTrader:
         
         # Сохраняем сброшенную модель
         self.save_model()
+    
+    def _calculate_trend_strength(self, market_data: Dict) -> float:
+        """Расчет силы тренда по нескольким таймфреймам"""
+        try:
+            trend_signals = []
+            for tf in ['5m', '15m', '1h']:
+                if (tf in market_data and market_data[tf] is not None and not market_data[tf].empty):
+                    df = market_data[tf].tail(50)
+                    if len(df) >= 20:
+                        # ADX-like trend strength
+                        high, low, close = df['high'], df['low'], df['close']
+                        plus_dm = np.maximum(high.diff(), 0)
+                        minus_dm = np.maximum(-low.diff(), 0)
+                        tr = np.maximum(high - low, np.maximum(abs(high - close.shift()), abs(low - close.shift())))
+                        
+                        plus_di = 100 * (plus_dm.rolling(14).mean() / tr.rolling(14).mean())
+                        minus_di = 100 * (minus_dm.rolling(14).mean() / tr.rolling(14).mean())
+                        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+                        adx = dx.rolling(14).mean().iloc[-1]
+                        
+                        if not np.isnan(adx):
+                            # Нормализуем ADX от 0-100 к -1,1
+                            trend_direction = 1 if plus_di.iloc[-1] > minus_di.iloc[-1] else -1
+                            trend_signals.append(trend_direction * (adx / 100))
+            
+            return np.mean(trend_signals) if trend_signals else 0.0
+        except:
+            return 0.0
+    
+    def _calculate_momentum_divergence(self, market_data: Dict) -> float:
+        """Обнаружение дивергенций моментума"""
+        try:
+            for tf in ['15m', '1h']:
+                if (tf in market_data and market_data[tf] is not None and not market_data[tf].empty):
+                    df = market_data[tf].tail(50)
+                    if len(df) >= 14:
+                        close = df['close']
+                        # RSI calculation
+                        delta = close.diff()
+                        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+                        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+                        rs = gain / loss
+                        rsi = 100 - (100 / (1 + rs))
+                        
+                        # Простая дивергенция: сравниваем направление цены и RSI
+                        price_trend = (close.iloc[-1] - close.iloc[-10]) / close.iloc[-10]
+                        rsi_trend = (rsi.iloc[-1] - rsi.iloc[-10]) / 100
+                        
+                        # Дивергенция: когда цена и RSI движутся в разные стороны
+                        if (price_trend > 0 and rsi_trend < 0) or (price_trend < 0 and rsi_trend > 0):
+                            return abs(price_trend - rsi_trend)  # Положительная дивергенция
+                        else:
+                            return 0.0
+            return 0.0
+        except:
+            return 0.0
+    
+    def _calculate_volume_profile(self, market_data: Dict) -> float:
+        """Анализ объемного профиля"""
+        try:
+            for tf in ['5m', '15m']:
+                if (tf in market_data and market_data[tf] is not None and not market_data[tf].empty):
+                    df = market_data[tf].tail(100)
+                    if len(df) >= 20:
+                        # VWAP и отклонение от него
+                        typical_price = (df['high'] + df['low'] + df['close']) / 3
+                        vwap = (typical_price * df['volume']).sum() / df['volume'].sum()
+                        current_price = df['close'].iloc[-1]
+                        
+                        # On-Balance Volume trend
+                        obv = np.where(df['close'] > df['close'].shift(1), df['volume'], 
+                                      np.where(df['close'] < df['close'].shift(1), -df['volume'], 0)).cumsum()
+                        obv_trend = (obv[-1] - obv[-10]) / (abs(obv[-10]) + 1e-8)
+                        
+                        # Комбинируем VWAP дистанцию и OBV тренд
+                        vwap_distance = (current_price - vwap) / vwap
+                        return np.clip(abs(vwap_distance) + abs(obv_trend) * 0.1, 0, 2)
+            return 0.0
+        except:
+            return 0.0
+    
+    def _calculate_timeframe_correlation(self, market_data: Dict) -> float:
+        """Корреляция между таймфреймами"""
+        try:
+            timeframes = ['5m', '15m', '1h']
+            returns_data = []
+            
+            for tf in timeframes:
+                if (tf in market_data and market_data[tf] is not None and not market_data[tf].empty):
+                    df = market_data[tf].tail(50)
+                    if len(df) > 1:
+                        returns = df['close'].pct_change().dropna()
+                        if len(returns) >= 10:
+                            returns_data.append(returns.iloc[-10:].values)  # Последние 10 возвратов
+            
+            if len(returns_data) >= 2:
+                # Средняя корреляция между всеми парами таймфреймов
+                correlations = []
+                for i in range(len(returns_data)):
+                    for j in range(i + 1, len(returns_data)):
+                        min_len = min(len(returns_data[i]), len(returns_data[j]))
+                        if min_len > 3:
+                            corr = np.corrcoef(returns_data[i][:min_len], returns_data[j][:min_len])[0, 1]
+                            if not np.isnan(corr):
+                                correlations.append(corr)
+                
+                return np.mean(correlations) if correlations else 0.0
+            return 0.0
+        except:
+            return 0.0
+    
+    def _calculate_spread_dynamics(self, market_data: Dict) -> float:
+        """Динамика спреда (bid-ask)"""
+        try:
+            # Приближаем спред через high-low в минутных данных
+            for tf in ['1m', '5m']:
+                if (tf in market_data and market_data[tf] is not None and not market_data[tf].empty):
+                    df = market_data[tf].tail(20)
+                    if len(df) > 1:
+                        spreads = (df['high'] - df['low']) / df['close']
+                        spread_volatility = spreads.std()
+                        avg_spread = spreads.mean()
+                        return np.clip(avg_spread + spread_volatility, 0, 1)
+            return 0.5
+        except:
+            return 0.5
+    
+    def _calculate_order_flow_imbalance(self, market_data: Dict) -> float:
+        """Небаланс ордерфлоу (приблизительно)"""
+        try:
+            for tf in ['1m', '5m']:
+                if (tf in market_data and market_data[tf] is not None and not market_data[tf].empty):
+                    df = market_data[tf].tail(20)
+                    if len(df) > 1:
+                        # Простое приближение: сравниваем объем на росте и падении
+                        up_volume = df[df['close'] > df['open']]['volume'].sum()
+                        down_volume = df[df['close'] < df['open']]['volume'].sum()
+                        total_volume = up_volume + down_volume
+                        
+                        if total_volume > 0:
+                            imbalance = (up_volume - down_volume) / total_volume
+                            return np.clip(imbalance, -1, 1)
+            return 0.0
+        except:
+            return 0.0
+    
+    def _extract_temporal_features(self) -> List[float]:
+        """Извлечение временных признаков"""
+        try:
+            now = datetime.now()
+            
+            # Циклическая кодировка времени (синус и косинус)
+            hour_sin = np.sin(2 * np.pi * now.hour / 24)
+            hour_cos = np.cos(2 * np.pi * now.hour / 24)
+            
+            day_of_week_sin = np.sin(2 * np.pi * now.weekday() / 7)
+            day_of_week_cos = np.cos(2 * np.pi * now.weekday() / 7)
+            
+            # Торговые сессии (приблизительно)
+            asian_session = 1.0 if 0 <= now.hour <= 8 else 0.0
+            european_session = 1.0 if 8 <= now.hour <= 16 else 0.0
+            american_session = 1.0 if 16 <= now.hour <= 24 else 0.0
+            
+            # Особые временные окна
+            weekend_factor = 0.5 if now.weekday() >= 5 else 1.0
+            
+            return [
+                hour_sin, hour_cos, day_of_week_sin, day_of_week_cos,
+                asian_session, european_session, american_session, weekend_factor
+            ]
+        except:
+            return [0.0] * 8

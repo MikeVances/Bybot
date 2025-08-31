@@ -1,6 +1,6 @@
 import os
 import click
-from bot.exchange.bybit_api import BybitAPI
+# REMOVED DANGEROUS v4 API IMPORT - USE ONLY v5
 from config import TELEGRAM_TOKEN, ADMIN_USER_ID
 import pandas as pd
 

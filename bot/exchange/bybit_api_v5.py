@@ -13,6 +13,8 @@ import csv
 
 from pybit.unified_trading import HTTP
 from config import BYBIT_API_KEY, BYBIT_API_SECRET, BYBIT_API_URL
+from bot.core.rate_limiter import get_rate_limiter
+from bot.core.secure_logger import get_secure_logger
 
 
 class BybitAPIV5:
@@ -52,15 +54,11 @@ class BybitAPIV5:
             testnet=testnet
         )
         
-        # Настройка логирования
-        log_dir = 'data/logs'
-        os.makedirs(log_dir, exist_ok=True)
-        self.logger = logging.getLogger('bybit_api_v5')
-        self.logger.setLevel(logging.INFO)
-        handler = logging.FileHandler(os.path.join(log_dir, 'bybit_api_v5.log'))
-        handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        if not self.logger.hasHandlers():
-            self.logger.addHandler(handler)
+        # Настройка защищённого логирования
+        self.logger = get_secure_logger('bybit_api_v5')
+        
+        # Инициализация rate limiter
+        self.rate_limiter = get_rate_limiter()
         
         self.logger.info(f"🚀 Bybit API v5 инициализирован (testnet: {testnet})")
     
@@ -72,8 +70,16 @@ class BybitAPIV5:
             Dict с информацией о балансе
         """
         try:
+            # 🛡️ RATE LIMITING: Проверка перед API вызовом
+            if not self.rate_limiter.can_make_request("get_wallet_balance"):
+                return {"retCode": -1001, "retMsg": "Rate limit exceeded for get_wallet_balance"}
+            
             response = self.session.get_wallet_balance(accountType="UNIFIED")
-            self.logger.info("✅ Баланс получен успешно")
+            self.logger.safe_log_api_response(
+                response, 
+                "Баланс получен успешно", 
+                "Ошибка получения баланса"
+            )
             return response
         except Exception as e:
             self.logger.error(f"❌ Ошибка получения баланса: {e}")
@@ -128,6 +134,9 @@ class BybitAPIV5:
             Ответ API
         """
         try:
+            # 🛡️ RATE LIMITING: Проверка перед критическим API вызовом
+            if not self.rate_limiter.can_make_request("create_order"):
+                return {"retCode": -1001, "retMsg": "Rate limit exceeded for create_order"}
             # Подготавливаем параметры
             params = {
                 "category": "linear",
@@ -156,15 +165,18 @@ class BybitAPIV5:
             if position_idx is not None:
                 params["positionIdx"] = position_idx
             
-            self.logger.info(f"🎯 Создаем ордер: {symbol} {side} {order_type} {qty}")
+            # Безопасное логирование запроса
+            self.logger.safe_log_order_request(symbol, side, order_type, qty, price)
             
             # Создаем ордер через официальную библиотеку
             response = self.session.place_order(**params)
             
-            if response.get('retCode') == 0:
-                self.logger.info(f"✅ Ордер создан: {response['result']}")
-            else:
-                self.logger.error(f"❌ Ошибка создания ордера: {response}")
+            # Безопасное логирование ответа
+            self.logger.safe_log_api_response(
+                response,
+                "Ордер создан успешно",
+                "Ошибка создания ордера"
+            )
             
             return response
             
@@ -190,6 +202,9 @@ class BybitAPIV5:
             Ответ API
         """
         try:
+            # 🛡️ RATE LIMITING: Проверка перед API вызовом
+            if not self.rate_limiter.can_make_request("set_trading_stop"):
+                return {"retCode": -1001, "retMsg": "Rate limit exceeded for set_trading_stop"}
             params = {
                 "category": "linear",
                 "symbol": symbol,
@@ -208,10 +223,11 @@ class BybitAPIV5:
             
             response = self.session.set_trading_stop(**params)
             
-            if response.get('retCode') == 0:
-                self.logger.info("✅ Стопы установлены успешно")
-            else:
-                self.logger.error(f"❌ Ошибка установки стопов: {response}")
+            self.logger.safe_log_api_response(
+                response,
+                "Стопы установлены успешно",
+                "Ошибка установки стопов"
+            )
             
             return response
             
@@ -230,6 +246,9 @@ class BybitAPIV5:
             Информация о позициях
         """
         try:
+            # 🛡️ RATE LIMITING: Проверка перед API вызовом
+            if not self.rate_limiter.can_make_request("get_positions"):
+                return {"retCode": -1001, "retMsg": "Rate limit exceeded for get_positions"}
             params = {
                 "category": "linear",
                 "accountType": "UNIFIED"
@@ -240,10 +259,11 @@ class BybitAPIV5:
             
             response = self.session.get_positions(**params)
             
-            if response.get('retCode') == 0:
-                self.logger.info("✅ Позиции получены успешно")
-            else:
-                self.logger.error(f"❌ Ошибка получения позиций: {response}")
+            self.logger.safe_log_api_response(
+                response,
+                "Позиции получены успешно",
+                "Ошибка получения позиций"
+            )
             
             return response
             
@@ -264,6 +284,10 @@ class BybitAPIV5:
             DataFrame с OHLCV данными
         """
         try:
+            # 🛡️ RATE LIMITING: Проверка перед API вызовом
+            if not self.rate_limiter.can_make_request("get_kline"):
+                self.logger.error("Rate limit exceeded for get_kline")
+                return None
             # Конвертируем интервал в формат Bybit
             interval_map = {
                 "1": "1", "3": "3", "5": "5", "15": "15", "30": "30",
@@ -316,15 +340,19 @@ class BybitAPIV5:
             Ответ API
         """
         try:
+            # 🛡️ RATE LIMITING: Проверка перед критическим API вызовом
+            if not self.rate_limiter.can_make_request("cancel_all_orders"):
+                return {"retCode": -1001, "retMsg": "Rate limit exceeded for cancel_all_orders"}
             response = self.session.cancel_all_orders(
                 category="linear",
                 symbol=symbol
             )
             
-            if response.get('retCode') == 0:
-                self.logger.info(f"✅ Все ордера отменены: {symbol}")
-            else:
-                self.logger.error(f"❌ Ошибка отмены ордеров: {response}")
+            self.logger.safe_log_api_response(
+                response,
+                f"Все ордера отменены: {symbol}",
+                "Ошибка отмены ордеров"
+            )
             
             return response
             
@@ -343,6 +371,9 @@ class BybitAPIV5:
             Информация об открытых ордерах
         """
         try:
+            # 🛡️ RATE LIMITING: Проверка перед API вызовом
+            if not self.rate_limiter.can_make_request("get_open_orders"):
+                return {"retCode": -1001, "retMsg": "Rate limit exceeded for get_open_orders"}
             params = {
                 "category": "linear",
                 "accountType": "UNIFIED"
@@ -353,10 +384,11 @@ class BybitAPIV5:
             
             response = self.session.get_open_orders(**params)
             
-            if response.get('retCode') == 0:
-                self.logger.info("✅ Открытые ордера получены успешно")
-            else:
-                self.logger.error(f"❌ Ошибка получения открытых ордеров: {response}")
+            self.logger.safe_log_api_response(
+                response,
+                "Открытые ордера получены успешно",
+                "Ошибка получения открытых ордеров"
+            )
             
             return response
             
@@ -390,6 +422,9 @@ class BybitAPIV5:
             Информация об инструментах
         """
         try:
+            # 🛡️ RATE LIMITING: Проверка перед API вызовом
+            if not self.rate_limiter.can_make_request("get_instruments_info"):
+                return {"retCode": -1001, "retMsg": "Rate limit exceeded for get_instruments_info"}
             params = {"category": category}
             if symbol:
                 params["symbol"] = symbol

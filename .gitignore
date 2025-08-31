@@ -82,3 +82,19 @@ debug_*.py
 # Docker artifacts
 docker-compose.override.yml
 *.pid
+
+# Secrets (локальные ключи, токены, пароли)
+secrets/
+
+# Cleanup rules - prevent junk files
+*copy*
+*backup*  
+*tmp*
+*OLD*
+*.tar.gz
+*.zip
+*.bak
+test_*.py
+check_*.py
+debug_*.py
+migration_*.py

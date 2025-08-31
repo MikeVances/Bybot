@@ -8,7 +8,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from bot.exchange.endpoints import Position, Trade, Account, Market
-from bot.exchange.bybit_api import BybitAPI
+# REMOVED DANGEROUS v4 API IMPORT - USE ONLY v5
 
 
 def main():

@@ -17,6 +17,14 @@ from bot.ai import NeuralIntegration
 from bot.risk import RiskManager
 from config import get_strategy_config
 
+# 🛡️ КРИТИЧЕСКИЕ ИМПОРТЫ БЕЗОПАСНОСТИ
+from bot.core.order_manager import get_order_manager, OrderRequest
+from bot.core.thread_safe_state import get_bot_state
+from bot.core.rate_limiter import get_rate_limiter
+from bot.core.secure_logger import get_secure_logger
+from bot.core.error_handler import get_error_handler, handle_trading_error, ErrorContext, RecoveryStrategy
+from bot.core.exceptions import OrderRejectionError, RateLimitError, EmergencyStopError
+
 # Импорты основных компонентов бота
 from bot.risk import RiskManager
 from bot.monitoring.metrics_exporter import MetricsExporter
@@ -620,18 +628,49 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                             
                             logger.info(f"🎯 Создаем {order_type} ордер по цене ${entry_price}")
                             
-                            order_response = api.create_order(
-                                symbol="BTCUSDT",
-                                side=api_side,
-                                order_type=order_type,
-                                qty=trade_amount,
-                                price=price_param,
-                                stop_loss=stop_loss,
-                                take_profit=take_profit
-                            )
+                            # 🛡️ БЕЗОПАСНОЕ СОЗДАНИЕ ОРДЕРА ЧЕРЕЗ OrderManager
+                            try:
+                                order_manager = get_order_manager()
+                                
+                                order_request = OrderRequest(
+                                    symbol="BTCUSDT",
+                                    side=api_side,
+                                    order_type=order_type,
+                                    qty=trade_amount,
+                                    price=price_param,
+                                    stop_loss=stop_loss,
+                                    take_profit=take_profit,
+                                    strategy_name=strategy_name
+                                )
+                                
+                                order_response = order_manager.create_order_safe(api, order_request)
+                                
+                            except (OrderRejectionError, RateLimitError, EmergencyStopError) as e:
+                                logger.error(f"🚫 Ордер заблокирован системой безопасности: {e}")
+                                continue  # Пропускаем эту итерацию стратегии
+                                
+                            except Exception as e:
+                                # 🛡️ ЦЕНТРАЛИЗОВАННАЯ ОБРАБОТКА ОШИБОК
+                                context = ErrorContext(
+                                    strategy_name=strategy_name,
+                                    symbol="BTCUSDT",
+                                    operation="create_order"
+                                )
+                                handle_trading_error(e, context, RecoveryStrategy.SKIP_ITERATION)
+                                continue
                             
                             if order_response and order_response.get('retCode') == 0:
-                                # Обновляем состояние
+                                # 🛡️ БЕЗОПАСНОЕ ОБНОВЛЕНИЕ СОСТОЯНИЯ через ThreadSafeBotState
+                                bot_state = get_bot_state()
+                                bot_state.set_position(
+                                    symbol="BTCUSDT",
+                                    side=api_side,
+                                    size=trade_amount,
+                                    entry_price=entry_price,
+                                    avg_price=entry_price
+                                )
+                                
+                                # Обновляем локальное состояние для совместимости
                                 state.in_position = True
                                 state.position_side = side
                                 state.entry_price = entry_price
@@ -665,7 +704,13 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                                 # Регистрируем в риск-менеджере
                                 risk_manager.register_trade(strategy_name, signal, order_response)
                                 
-                                logger.info(f"✅ Позиция открыта: {order_response['result']}")
+                                # 🛡️ БЕЗОПАСНОЕ ЛОГИРОВАНИЕ без утечек API данных
+                                secure_logger = get_secure_logger('trader')
+                                secure_logger.safe_log_api_response(
+                                    order_response,
+                                    f"✅ Позиция {strategy_name} открыта",
+                                    f"❌ Ошибка открытия позиции {strategy_name}"
+                                )
                                 main_logger.info(f"Стратегия {strategy_name}: позиция открыта и зарегистрирована")
                                 
                                 # Отправляем уведомление о позиции
@@ -717,14 +762,34 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                             
                             logger.info(f"🔚 Закрываем позицию {state.position_side} сигналом {signal_type}")
                             
-                            # Закрываем позицию
-                            close_response = api.create_order(
-                                symbol="BTCUSDT",
-                                side=api_close_side,
-                                order_type="Market",
-                                qty=state.position_size,
-                                reduce_only=True
-                            )
+                            # 🛡️ БЕЗОПАСНОЕ ЗАКРЫТИЕ ПОЗИЦИИ ЧЕРЕЗ OrderManager
+                            try:
+                                order_manager = get_order_manager()
+                                
+                                close_request = OrderRequest(
+                                    symbol="BTCUSDT",
+                                    side=api_close_side,
+                                    order_type="Market",
+                                    qty=state.position_size,
+                                    reduce_only=True,
+                                    strategy_name=strategy_name
+                                )
+                                
+                                close_response = order_manager.create_order_safe(api, close_request)
+                                
+                            except (OrderRejectionError, RateLimitError, EmergencyStopError) as e:
+                                logger.error(f"🚫 Закрытие позиции заблокировано: {e}")
+                                continue
+                                
+                            except Exception as e:
+                                # 🛡️ ЦЕНТРАЛИЗОВАННАЯ ОБРАБОТКА ОШИБОК 
+                                context = ErrorContext(
+                                    strategy_name=strategy_name,
+                                    symbol="BTCUSDT", 
+                                    operation="close_position"
+                                )
+                                handle_trading_error(e, context, RecoveryStrategy.SKIP_ITERATION)
+                                continue
                             
                             if close_response and close_response.get('retCode') == 0:
                                 # Вычисляем P&L

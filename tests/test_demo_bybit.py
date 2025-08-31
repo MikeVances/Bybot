@@ -1,5 +1,5 @@
 import unittest
-from bot.exchange.bybit_api import BybitAPI
+# REMOVED DANGEROUS v4 API IMPORT - USE ONLY v5
 
 class TestBybitAPI(unittest.TestCase):
     def setUp(self):

@@ -175,7 +175,7 @@ class TelegramBot:
     async def _position(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать текущие позиции"""
         try:
-            from bot.exchange.bybit_api import BybitAPI
+            # REMOVED DANGEROUS v4 API IMPORT - USE ONLY v5
             api = BybitAPI()
             positions = api.get_positions("BTCUSDT")
             
