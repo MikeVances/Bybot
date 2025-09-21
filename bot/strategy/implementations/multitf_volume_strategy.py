@@ -369,273 +369,122 @@ class MultiTFVolumeStrategy(BaseStrategy):
     
     def calculate_signal_strength(self, market_data, indicators: Dict, signal_type: str) -> float:
         """
-        Расчет силы сигнала для MultiTF стратегии
-        
+        Расчет силы сигнала для MultiTF стратегии - ОПТИМИЗИРОВАНО до 3 ключевых факторов
+
         Args:
             market_data: Рыночные данные
             indicators: Рассчитанные индикаторы
             signal_type: Тип сигнала ('BUY' или 'SELL')
-        
+
         Returns:
             Сила сигнала от 0 до 1
         """
         try:
+            # КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: только 3 основных фактора
             strength_factors = []
-            
-            # 1. Фактор синхронизации трендов (0-1) - самый важный для MTF стратегии
+
+            # 1. Фактор синхронизации трендов (0-1) - ГЛАВНЫЙ для MTF стратегии
             trends_aligned_bullish = indicators.get('trends_aligned_bullish', False)
             trends_aligned_bearish = indicators.get('trends_aligned_bearish', False)
-            
+
             # Handle Series types for trend alignment
             if isinstance(trends_aligned_bullish, pd.Series):
                 trends_aligned_bullish = bool(trends_aligned_bullish.iloc[-1]) if not trends_aligned_bullish.empty else False
             if isinstance(trends_aligned_bearish, pd.Series):
                 trends_aligned_bearish = bool(trends_aligned_bearish.iloc[-1]) if not trends_aligned_bearish.empty else False
-                
+
             if signal_type == 'BUY':
                 trend_sync_factor = 1.0 if trends_aligned_bullish else 0.0
             else:
                 trend_sync_factor = 1.0 if trends_aligned_bearish else 0.0
             strength_factors.append(trend_sync_factor)
-            
-            # 2. Фактор объемного всплеска (0-1)
+
+            # 2. Фактор объемного подтверждения (0-1) - КРИТИЧЕСКИЙ для входа
             volume_data = indicators.get('volume_analysis', {})
             volume_ratio = volume_data.get('volume_ratio', pd.Series([1])).iloc[-1] if isinstance(volume_data.get('volume_ratio'), pd.Series) else 1.0
             volume_factor = min(volume_ratio / self.config.volume_multiplier, 2.0) / 2.0
             strength_factors.append(volume_factor)
-            
-            # 3. Фактор силы тренда на медленном ТФ (0-1)
+
+            # 3. Фактор позиции цены (0-1) - упрощенный momentum
             slow_trend = indicators.get('slow_trend', {})
             trend_strength = slow_trend.get('trend_strength', 0)
-            
+
             # Handle pandas Series for trend_strength
             if isinstance(trend_strength, pd.Series):
                 trend_strength = float(trend_strength.iloc[-1]) if not trend_strength.empty else 0.0
-                
-            trend_strength_factor = min(trend_strength / self.config.trend_strength_threshold, 1.0)
-            strength_factors.append(trend_strength_factor)
-            
-            # 4. Фактор RSI (0-1)
-            rsi_data = indicators.get('rsi', pd.Series([50]))
-            if isinstance(rsi_data, pd.Series):
-                rsi = float(rsi_data.iloc[-1]) if not rsi_data.empty else 50.0
-            else:
-                rsi = float(rsi_data)
-            
-            # Проверяем, что значение не является NaN
-            if not pd.isna(rsi):
-                # Use scalar value for comparison
-                rsi_value = float(rsi)
-                if signal_type == 'BUY':
-                    rsi_factor = max(0, (50 - rsi_value) / 50) if rsi_value < 50 else 0
-                else:
-                    rsi_factor = max(0, (rsi_value - 50) / 50) if rsi_value > 50 else 0
-            else:
-                rsi_factor = 0.0
-            strength_factors.append(rsi_factor)
-            
-            # 5. Фактор MACD (0-1)
-            macd_data = indicators.get('macd', 0)
-            macd_signal_data = indicators.get('macd_signal', 0)
-            
-            # Обработка pandas Series
-            if isinstance(macd_data, pd.Series):
-                macd = float(macd_data.iloc[-1]) if not macd_data.empty else 0.0
-            else:
-                macd = float(macd_data)
-                
-            if isinstance(macd_signal_data, pd.Series):
-                macd_signal = float(macd_signal_data.iloc[-1]) if not macd_signal_data.empty else 0.0
-            else:
-                macd_signal = float(macd_signal_data)
-            
-            # Проверяем, что значения не являются NaN
-            if not (pd.isna(macd) or pd.isna(macd_signal)) and macd_signal != 0:
-                # Use scalar values for comparison
-                macd_value = float(macd)
-                macd_signal_value = float(macd_signal)
-                if signal_type == 'BUY':
-                    macd_factor = max(0, (macd_value - macd_signal_value) / abs(macd_signal_value))
-                else:
-                    macd_factor = max(0, (macd_signal_value - macd_value) / abs(macd_signal_value))
-                macd_factor = min(macd_factor, 1.0)
-            else:
-                macd_factor = 0.0
-            strength_factors.append(macd_factor)
-            
-            # 6. Фактор синхронизации моментума (0-1)
-            momentum_alignment = indicators.get('momentum_alignment', False)
-            # Handle Series type for momentum_alignment
-            if isinstance(momentum_alignment, pd.Series):
-                momentum_alignment = bool(momentum_alignment.iloc[-1]) if not momentum_alignment.empty else False
-            momentum_factor = 1.0 if momentum_alignment else 0.0
-            strength_factors.append(momentum_factor)
-            
-            # 7. Фактор дивергенции (0-1)
-            if self.config.mtf_divergence_detection:
-                divergence = indicators.get('mtf_divergence', {})
-                bullish_divergence = divergence.get('bullish_divergence', False)
-                bearish_divergence = divergence.get('bearish_divergence', False)
-                
-                # Handle Series types
-                if isinstance(bullish_divergence, pd.Series):
-                    bullish_divergence = bool(bullish_divergence.iloc[-1]) if not bullish_divergence.empty else False
-                if isinstance(bearish_divergence, pd.Series):
-                    bearish_divergence = bool(bearish_divergence.iloc[-1]) if not bearish_divergence.empty else False
-                    
-                if signal_type == 'BUY' and bullish_divergence:
-                    divergence_factor = 1.0
-                elif signal_type == 'SELL' and bearish_divergence:
-                    divergence_factor = 1.0
-                else:
-                    divergence_factor = 0.0
-            else:
-                divergence_factor = 0.5  # Нейтральный фактор
-            strength_factors.append(divergence_factor)
-            
-            # Взвешенная сила сигнала
-            weights = [0.30, 0.20, 0.15, 0.12, 0.10, 0.08, 0.05]  # Синхронизация трендов важнее
+
+            price_position_factor = min(trend_strength / self.config.trend_strength_threshold, 1.0)
+            strength_factors.append(price_position_factor)
+
+            # УПРОЩЕННЫЕ ВЕСА: равномерное распределение для ускорения
+            weights = [0.50, 0.30, 0.20]  # Тренд доминирует, объем подтверждает, позиция уточняет
             signal_strength = sum(factor * weight for factor, weight in zip(strength_factors, weights))
-            
+
             return min(signal_strength, 1.0)
-            
+
         except Exception as e:
             self.logger.error(f"Ошибка расчета силы сигнала: {e}")
             return 0.5
     
     def check_confluence_factors(self, market_data, indicators: Dict, signal_type: str) -> Tuple[int, List[str]]:
         """
-        Проверка confluence факторов для MultiTF стратегии
-        
+        Проверка confluence факторов для MultiTF стратегии - УПРОЩЕНО до 3 ключевых факторов
+
         Args:
             market_data: Рыночные данные
             indicators: Рассчитанные индикаторы
             signal_type: Тип сигнала ('BUY' или 'SELL')
-        
+
         Returns:
             Tuple: (количество факторов, список факторов)
         """
         try:
             confluence_count = 0
             factors = []
-            
-            # 1. Синхронизация трендов
+
+            # ФАКТОР 1: Синхронизация трендов между таймфреймами (ГЛАВНЫЙ)
             trends_aligned_bullish = indicators.get('trends_aligned_bullish', False)
             trends_aligned_bearish = indicators.get('trends_aligned_bearish', False)
-            
+
             # Handle Series types for trend alignment
             if isinstance(trends_aligned_bullish, pd.Series):
                 trends_aligned_bullish = bool(trends_aligned_bullish.iloc[-1]) if not trends_aligned_bullish.empty else False
             if isinstance(trends_aligned_bearish, pd.Series):
                 trends_aligned_bearish = bool(trends_aligned_bearish.iloc[-1]) if not trends_aligned_bearish.empty else False
-                
+
             if signal_type == 'BUY' and trends_aligned_bullish:
                 confluence_count += 1
-                factors.append(ConfluenceFactor.BULLISH_TREND.value)
+                factors.append('trend_alignment')
             elif signal_type == 'SELL' and trends_aligned_bearish:
                 confluence_count += 1
-                factors.append(ConfluenceFactor.BEARISH_TREND.value)
-            
-            # 2. Объемный всплеск
+                factors.append('trend_alignment')
+
+            # ФАКТОР 2: Объемное подтверждение (КРИТИЧЕСКИЙ)
             volume_data = indicators.get('volume_analysis', {})
             volume_spike = volume_data.get('volume_spike', False)
-            
+
             # Handle Series type for volume_spike
             if isinstance(volume_spike, pd.Series):
                 volume_spike = bool(volume_spike.iloc[-1]) if not volume_spike.empty else False
-                
+
             if volume_spike:
                 confluence_count += 1
-                factors.append(ConfluenceFactor.HIGH_VOLUME.value)
-            
-            # 3. Сила тренда на медленном ТФ
+                factors.append('volume_confirmation')
+
+            # ФАКТОР 3: Позиция цены (упрощенный trend strength)
             slow_trend = indicators.get('slow_trend', {})
             trend_strength = slow_trend.get('trend_strength', 0)
-            
+
             # Handle Series type for trend_strength
             if isinstance(trend_strength, pd.Series):
                 trend_strength = float(trend_strength.iloc[-1]) if not trend_strength.empty else 0.0
-                
+
             if trend_strength > self.config.trend_strength_threshold:
                 confluence_count += 1
-                factors.append('strong_trend')
-            
-            # 4. RSI фактор
-            rsi_data = indicators.get('rsi')
-            if rsi_data is not None:
-                if isinstance(rsi_data, pd.Series):
-                    rsi = float(rsi_data.iloc[-1]) if not rsi_data.empty else 50.0
-                else:
-                    rsi = float(rsi_data)
-                
-                # Use scalar value for comparison
-                rsi_value = float(rsi)
-                if signal_type == 'BUY' and 30 <= rsi_value <= 60:
-                    confluence_count += 1
-                    factors.append(ConfluenceFactor.RSI_FAVORABLE.value)
-                elif signal_type == 'SELL' and 40 <= rsi_value <= 70:
-                    confluence_count += 1
-                    factors.append(ConfluenceFactor.RSI_FAVORABLE.value)
-            
-            # 5. MACD фактор
-            macd_data = indicators.get('macd', 0)
-            macd_signal_data = indicators.get('macd_signal', 0)
-            
-            # Обработка pandas Series - исправлено для избежания Series ambiguity
-            if isinstance(macd_data, pd.Series):
-                macd = float(macd_data.iloc[-1]) if not macd_data.empty else 0.0
-            else:
-                macd = float(macd_data)
-                
-            if isinstance(macd_signal_data, pd.Series):
-                macd_signal = float(macd_signal_data.iloc[-1]) if not macd_signal_data.empty else 0.0
-            else:
-                macd_signal = float(macd_signal_data)
-            
-            # Проверяем, что значения не являются NaN
-            if not (pd.isna(macd) or pd.isna(macd_signal)):
-                # Use scalar values for comparison
-                macd_value = float(macd)
-                macd_signal_value = float(macd_signal)
-                if signal_type == 'BUY' and macd_value > macd_signal_value:
-                    confluence_count += 1
-                    factors.append('macd_bullish')
-                elif signal_type == 'SELL' and macd_value < macd_signal_value:
-                    confluence_count += 1
-                    factors.append('macd_bearish')
-            
-            # 6. Синхронизация моментума
-            momentum_alignment = indicators.get('momentum_alignment', False)
-            
-            # Handle Series type for momentum_alignment
-            if isinstance(momentum_alignment, pd.Series):
-                momentum_alignment = bool(momentum_alignment.iloc[-1]) if not momentum_alignment.empty else False
-                
-            if momentum_alignment:
-                confluence_count += 1
-                factors.append('momentum_aligned')
-            
-            # 7. Дивергенция фактор
-            if self.config.mtf_divergence_detection:
-                divergence = indicators.get('mtf_divergence', {})
-                bullish_divergence = divergence.get('bullish_divergence', False)
-                bearish_divergence = divergence.get('bearish_divergence', False)
-                
-                # Handle Series types
-                if isinstance(bullish_divergence, pd.Series):
-                    bullish_divergence = bool(bullish_divergence.iloc[-1]) if not bullish_divergence.empty else False
-                if isinstance(bearish_divergence, pd.Series):
-                    bearish_divergence = bool(bearish_divergence.iloc[-1]) if not bearish_divergence.empty else False
-                    
-                if signal_type == 'BUY' and bullish_divergence:
-                    confluence_count += 1
-                    factors.append('mtf_bullish_divergence')
-                elif signal_type == 'SELL' and bearish_divergence:
-                    confluence_count += 1
-                    factors.append('mtf_bearish_divergence')
-            
+                factors.append('price_position')
+
             return confluence_count, factors
-            
+
         except Exception as e:
             self.logger.error(f"Ошибка проверки confluence факторов: {e}")
             return 0, []

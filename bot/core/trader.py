@@ -374,6 +374,17 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
     # Настройка логирования
     main_logger = logging.getLogger('main_trading')
     main_logger.setLevel(logging.INFO)
+
+    # === БЛОК А2: TTL КЭШИРОВАНИЕ ДЛЯ ПРЕДОТВРАЩЕНИЯ MEMORY LEAKS ===
+    from bot.strategy.utils.indicators import TTLCache
+
+    # Кэши с автоматической очисткой для предотвращения утечек памяти
+    market_data_cache = TTLCache(maxsize=10, ttl=300)  # 5 минут
+    strategy_results_cache = TTLCache(maxsize=50, ttl=180)  # 3 минуты
+    balance_cache = TTLCache(maxsize=20, ttl=60)  # 1 минута
+    position_cache = TTLCache(maxsize=20, ttl=120)  # 2 минуты
+
+    main_logger.info("🗂️ TTL кэширование инициализировано для предотвращения memory leaks")
     
     try:
         # Инициализируем Telegram бот для уведомлений
@@ -498,7 +509,13 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                     api = strategy_apis[strategy_name]
                     logger = strategy_loggers[strategy_name]
                     
-                    current_balance = get_current_balance(api)
+                    # Используем кэш балансов для снижения API запросов
+                    balance_key = f"balance_{strategy_name}"
+                    current_balance = balance_cache.get(balance_key)
+                    if current_balance is None:
+                        current_balance = get_current_balance(api)
+                        balance_cache.set(balance_key, current_balance)
+
                     if current_balance >= 10:  # Минимум для торговли
                         active_strategies.append(strategy_name)
                         logger.debug(f"💰 Баланс: ${current_balance:.2f}")
@@ -512,30 +529,40 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                 
                 main_logger.info(f"✅ Активных стратегий: {len(active_strategies)}")
 
-                # Получаем рыночные данные
+                # Получаем рыночные данные с кэшированием
                 first_api = strategy_apis[active_strategies[0]]
-                all_market_data = {}
-                
-                timeframes = {
-                    '1m': "1",
-                    '5m': "5", 
-                    '15m': "15",
-                    '1h': "60"
-                }
-                
-                for tf_name, tf_value in timeframes.items():
-                    try:
-                        df = first_api.get_ohlcv(interval=tf_value, limit=200)
-                        if df is not None and not df.empty:
-                            # Конвертируем строки в числа
-                            for col in ['open', 'high', 'low', 'close', 'volume']:
-                                if col in df.columns:
-                                    df[col] = pd.to_numeric(df[col], errors='coerce')
-                            all_market_data[tf_name] = df
-                        else:
-                            main_logger.warning(f"⚠️ Пустые данные для {tf_name}")
-                    except Exception as e:
-                        main_logger.error(f"❌ Ошибка получения данных {tf_name}: {e}")
+                market_data_key = f"market_data_{current_time.minute // 2}"  # Кэш на 2 минуты
+
+                all_market_data = market_data_cache.get(market_data_key)
+                if all_market_data is None:
+                    all_market_data = {}
+                    timeframes = {
+                        '1m': "1",
+                        '5m': "5",
+                        '15m': "15",
+                        '1h': "60"
+                    }
+
+                    for tf_name, tf_value in timeframes.items():
+                        try:
+                            df = first_api.get_ohlcv(interval=tf_value, limit=200)
+                            if df is not None and not df.empty:
+                                # Конвертируем строки в числа
+                                for col in ['open', 'high', 'low', 'close', 'volume']:
+                                    if col in df.columns:
+                                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                                all_market_data[tf_name] = df
+                            else:
+                                main_logger.warning(f"⚠️ Пустые данные для {tf_name}")
+                        except Exception as e:
+                            main_logger.error(f"❌ Ошибка получения данных {tf_name}: {e}")
+
+                    # Сохраняем в кэш только если получили данные
+                    if all_market_data:
+                        market_data_cache.set(market_data_key, all_market_data)
+                        main_logger.debug("📊 Рыночные данные обновлены и закэшированы")
+                    else:
+                        main_logger.debug("📊 Используем закэшированные рыночные данные")
                 
                 if not all_market_data:
                     main_logger.error("❌ Не удалось получить рыночные данные")
@@ -920,6 +947,17 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                     except Exception as e:
                         main_logger.error(f"❌ Ошибка нейронной сети: {e}")
                 
+                # === БЛОК А2: ПЕРИОДИЧЕСКАЯ ОЧИСТКА ПАМЯТИ ===
+                # Каждые 10 итераций очищаем кэши и принудительно собираем мусор
+                if iteration_count % 10 == 0:
+                    import gc
+                    market_data_cache.clear()
+                    strategy_results_cache.clear()
+                    balance_cache.clear()
+                    position_cache.clear()
+                    gc.collect()
+                    main_logger.info(f"🗂️ Очистка памяти выполнена (итерация #{iteration_count})")
+
                 # Пауза между итерациями
                 main_logger.debug("⏳ Пауза 30 секунд...")
                 shutdown_event.wait(30)

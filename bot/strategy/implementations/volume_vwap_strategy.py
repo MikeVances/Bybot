@@ -218,13 +218,13 @@ class VolumeVWAPStrategy(BaseStrategy):
     
     def calculate_signal_strength(self, market_data, indicators: Dict, signal_type: str) -> float:
         """
-        Расчет силы сигнала для VWAP стратегии
-        
+        Расчет силы сигнала для VWAP стратегии - ОПТИМИЗИРОВАНО до 3 ключевых факторов
+
         Args:
             market_data: Рыночные данные
             indicators: Рассчитанные индикаторы
             signal_type: Тип сигнала ('BUY' или 'SELL')
-        
+
         Returns:
             Сила сигнала от 0.0 до 1.0
         """
@@ -232,97 +232,67 @@ class VolumeVWAPStrategy(BaseStrategy):
             df = self.get_primary_dataframe(market_data)
             if df is None or not indicators:
                 return 0.0
-            
+
+            # КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: только 3 основных фактора для VWAP
             strength_factors = []
             last_idx = -1
-            
-            # 1. Фактор объемного всплеска (0-1)
+
+            # 1. Фактор объемного подтверждения (0-1) - ГЛАВНЫЙ
             if 'volume_ratio' in indicators:
                 volume_ratio = indicators['volume_ratio'].iloc[last_idx]
                 volume_factor = min(volume_ratio / self.config.volume_multiplier, 3.0) / 3.0
                 strength_factors.append(volume_factor)
-            
-            # 2. Фактор отклонения от VWAP (0-1)
+
+            # 2. Фактор VWAP позиции (0-1) - КРИТИЧЕСКИЙ
             if 'vwap_deviation' in indicators:
                 vwap_deviation = indicators['vwap_deviation'].iloc[last_idx]
                 # Чем больше отклонение, тем сильнее потенциал возврата к VWAP
                 vwap_factor = min(vwap_deviation / (self.config.vwap_deviation_threshold * 2), 1.0)
                 strength_factors.append(vwap_factor)
-            
-            # 3. Фактор силы тренда (0-1)
-            if 'trend_strength' in indicators:
-                trend_strength = indicators['trend_strength']
-                trend_factor = min(trend_strength, 1.0)
-                strength_factors.append(trend_factor)
-            
-            # 4. Фактор направления тренда (0-1)
+
+            # 3. Фактор направления тренда (0-1) - ПОДТВЕРЖДАЮЩИЙ
             if signal_type in ['BUY', SignalType.BUY]:
                 if 'trend_bullish' in indicators and indicators['trend_bullish'].iloc[last_idx]:
-                    strength_factors.append(1.0)
+                    trend_factor = 1.0
                 else:
-                    strength_factors.append(0.3)  # Штраф за отсутствие трендового подтверждения
+                    trend_factor = 0.3  # Слабое подтверждение
             else:
                 if 'trend_bearish' in indicators and indicators['trend_bearish'].iloc[last_idx]:
-                    strength_factors.append(1.0)
+                    trend_factor = 1.0
                 else:
-                    strength_factors.append(0.3)
-            
-            # 5. RSI фактор (избегаем экстремальных значений)
-            if 'rsi' in indicators:
-                rsi = indicators['rsi'].iloc[last_idx]
-                if signal_type in ['BUY', SignalType.BUY]:
-                    # Для покупки лучше когда RSI не перекуплен
-                    rsi_factor = max(0, (70 - rsi) / 70) if rsi <= 70 else 0.2
-                else:
-                    # Для продажи лучше когда RSI не перепродан
-                    rsi_factor = max(0, (rsi - 30) / 70) if rsi >= 30 else 0.2
-                strength_factors.append(rsi_factor)
-            
-            # 6. Моментум фактор (0-1)
-            if 'price_momentum' in indicators:
-                momentum = indicators['price_momentum'].iloc[last_idx]
-                if signal_type in ['BUY', SignalType.BUY]:
-                    momentum_factor = max(0, min(momentum * 50, 1.0)) if momentum > 0 else 0
-                else:
-                    momentum_factor = max(0, min(-momentum * 50, 1.0)) if momentum < 0 else 0
-                strength_factors.append(momentum_factor)
-            
-            # 7. Volume consistency фактор
-            if 'volume_consistent' in indicators and indicators['volume_consistent'].iloc[last_idx]:
-                strength_factors.append(1.0)
-            else:
-                strength_factors.append(0.5)
-            
-            # Взвешенная сила сигнала
-            weights = [0.25, 0.20, 0.15, 0.15, 0.10, 0.10, 0.05]  # Объем и VWAP важнее
-            
+                    trend_factor = 0.3
+            strength_factors.append(trend_factor)
+
+            # УПРОЩЕННЫЕ ВЕСА: равномерное распределение
+            weights = [0.40, 0.35, 0.25]  # Объём доминирует, VWAP подтверждает, тренд уточняет
+
+            # Обработка неполных данных
             if len(strength_factors) != len(weights):
-                # Корректируем веса если факторов меньше
                 weights = weights[:len(strength_factors)]
                 total_weight = sum(weights)
-                weights = [w/total_weight for w in weights]
-            
+                weights = [w/total_weight for w in weights] if total_weight > 0 else [1.0/len(strength_factors)] * len(strength_factors)
+
             signal_strength = sum(factor * weight for factor, weight in zip(strength_factors, weights))
-            
+
             # Финальная нормализация
             final_strength = max(0.0, min(1.0, signal_strength))
-            
+
             self.logger.debug(f"Сила сигнала {signal_type}: {final_strength:.3f} (факторы: {len(strength_factors)})")
             return final_strength
-            
+
         except Exception as e:
             self.logger.error(f"Ошибка расчета силы сигнала: {e}")
             return 0.5
     
     def check_confluence_factors(self, market_data, indicators: Dict, signal_type: str) -> Tuple[int, List[str]]:
         """
-        Проверка подтверждающих факторов для VWAP стратегии
-        
+        Проверка подтверждающих факторов для VWAP стратегии - УПРОЩЕНО до 3 ключевых факторов
+
         Args:
             market_data: Рыночные данные
             indicators: Рассчитанные индикаторы
             signal_type: Тип сигнала
-        
+
         Returns:
             Tuple (количество_факторов, список_факторов)
         """
@@ -330,71 +300,34 @@ class VolumeVWAPStrategy(BaseStrategy):
             confluence_count = 0
             factors = []
             last_idx = -1
-            
+
             if not indicators:
                 return 0, []
-            
-            # 1. Объемный всплеск
+
+            # ФАКТОР 1: Объёмное подтверждение (ГЛАВНЫЙ)
             if indicators.get('volume_spike', pd.Series([False])).iloc[last_idx]:
                 confluence_count += 1
-                factors.append(ConfluenceFactor.VOLUME_SPIKE.value)
-            
-            # 2. Увеличивающийся объем
-            if indicators.get('volume_increasing', pd.Series([False])).iloc[last_idx]:
-                confluence_count += 1
-                factors.append(ConfluenceFactor.VOLUME_INCREASING.value)
-            
-            # 3. VWAP позиция
+                factors.append('volume_confirmation')
+
+            # ФАКТОР 2: VWAP позиция (КРИТИЧЕСКИЙ)
             if signal_type in ['BUY', SignalType.BUY]:
                 if indicators.get('price_above_vwap', pd.Series([False])).iloc[last_idx]:
                     confluence_count += 1
-                    factors.append(ConfluenceFactor.PRICE_ABOVE_VWAP.value)
-                    
-                # VWAP подтверждение несколькими барами
-                if indicators.get('vwap_bullish_confirmed', pd.Series([False])).iloc[last_idx]:
-                    confluence_count += 1
-                    factors.append('vwap_bullish_confirmed')
-                    
+                    factors.append('vwap_position')
             else:  # SELL
                 if indicators.get('price_below_vwap', pd.Series([False])).iloc[last_idx]:
                     confluence_count += 1
-                    factors.append(ConfluenceFactor.PRICE_BELOW_VWAP.value)
-                    
-                if indicators.get('vwap_bearish_confirmed', pd.Series([False])).iloc[last_idx]:
-                    confluence_count += 1
-                    factors.append('vwap_bearish_confirmed')
-            
-            # 4. Трендовое подтверждение
+                    factors.append('vwap_position')
+
+            # ФАКТОР 3: Трендовое подтверждение (ПОДТВЕРЖДАЮЩИЙ)
             if signal_type in ['BUY', SignalType.BUY]:
                 if indicators.get('trend_bullish', pd.Series([False])).iloc[last_idx]:
                     confluence_count += 1
-                    factors.append(ConfluenceFactor.BULLISH_TREND.value)
+                    factors.append('trend_alignment')
             else:
                 if indicators.get('trend_bearish', pd.Series([False])).iloc[last_idx]:
                     confluence_count += 1
-                    factors.append(ConfluenceFactor.BEARISH_TREND.value)
-            
-            # 5. RSI подтверждение
-            if 'rsi' in indicators:
-                rsi = indicators['rsi'].iloc[last_idx]
-                if signal_type in ['BUY', SignalType.BUY] and 30 <= rsi <= 65:
-                    confluence_count += 1
-                    factors.append(ConfluenceFactor.RSI_FAVORABLE.value)
-                elif signal_type in ['SELL', SignalType.SELL] and 35 <= rsi <= 70:
-                    confluence_count += 1
-                    factors.append(ConfluenceFactor.RSI_FAVORABLE.value)
-            
-            # 6. Bollinger Bands позиция
-            if 'bb' in indicators and 'bb_position' in indicators['bb']:
-                bb_position = indicators['bb']['bb_position'].iloc[last_idx]
-                if signal_type in ['BUY', SignalType.BUY] and bb_position < 0.3:
-                    confluence_count += 1
-                    factors.append(ConfluenceFactor.BB_OVERSOLD.value)
-                elif signal_type in ['SELL', SignalType.SELL] and bb_position > 0.7:
-                    confluence_count += 1
-                    factors.append(ConfluenceFactor.BB_OVERBOUGHT.value)
-            
-            # 7. Моментум подтверждение
+                    factors.append('trend_alignment')
             if signal_type in ['BUY', SignalType.BUY]:
                 if indicators.get('momentum_bullish', pd.Series([False])).iloc[last_idx]:
                     confluence_count += 1
@@ -409,17 +342,7 @@ class VolumeVWAPStrategy(BaseStrategy):
                 confluence_count += 1
                 factors.append(ConfluenceFactor.VWAP_DEVIATION.value)
             
-            # 9. Volume consistency
-            if indicators.get('volume_consistent', pd.Series([False])).iloc[last_idx]:
-                confluence_count += 1
-                factors.append('volume_consistency')
             
-            # 10. Высокий объем (дополнительный фактор)
-            if 'volume_ratio' in indicators and indicators['volume_ratio'].iloc[last_idx] > self.config.volume_multiplier * 1.5:
-                confluence_count += 1
-                factors.append(ConfluenceFactor.HIGH_VOLUME.value)
-            
-            self.logger.debug(f"Confluence для {signal_type}: {confluence_count} факторов ({factors})")
             return confluence_count, factors
             
         except Exception as e:

@@ -2,6 +2,7 @@
 """
 Централизованная библиотека технических индикаторов для торговых стратегий
 Все индикаторы в одном месте для устранения дублирования кода
+КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: TTL кэширование для производительности
 """
 
 import pandas as pd
@@ -10,9 +11,66 @@ from typing import Dict, Optional, Union, Tuple, List
 import logging
 from dataclasses import dataclass
 from enum import Enum
+import time
+import hashlib
+from functools import lru_cache
+from threading import Lock
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
+
+# КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: TTL Cache для индикаторов
+class TTLCache:
+    """Time-To-Live cache для критических индикаторов"""
+    def __init__(self, maxsize: int = 100, ttl: int = 60):
+        self.maxsize = maxsize
+        self.ttl = ttl
+        self._cache = {}
+        self._timestamps = {}
+        self._lock = Lock()
+
+    def get(self, key):
+        with self._lock:
+            if key in self._cache:
+                if time.time() - self._timestamps[key] < self.ttl:
+                    return self._cache[key]
+                else:
+                    # Устаревший кэш - удаляем
+                    del self._cache[key]
+                    del self._timestamps[key]
+        return None
+
+    def put(self, key, value):
+        with self._lock:
+            # Очищаем старые записи если кэш переполнен
+            if len(self._cache) >= self.maxsize:
+                oldest_key = min(self._timestamps.keys(), key=lambda k: self._timestamps[k])
+                del self._cache[oldest_key]
+                del self._timestamps[oldest_key]
+
+            self._cache[key] = value
+            self._timestamps[key] = time.time()
+
+    def clear(self):
+        with self._lock:
+            self._cache.clear()
+            self._timestamps.clear()
+
+# Глобальные кэши для критических индикаторов
+_VWAP_CACHE = TTLCache(maxsize=50, ttl=30)    # VWAP - 30 сек
+_RSI_CACHE = TTLCache(maxsize=100, ttl=60)     # RSI - 60 сек
+_ATR_CACHE = TTLCache(maxsize=100, ttl=60)     # ATR - 60 сек
+_SMA_CACHE = TTLCache(maxsize=200, ttl=120)    # SMA - 2 мин
+
+def _create_data_hash(df: pd.DataFrame, params: str = "") -> str:
+    """Создание хэша для кэширования данных"""
+    try:
+        # Используем последние 10 строк + параметры для хэша
+        last_data = df.tail(10)
+        data_str = f"{last_data.to_string()}{params}"
+        return hashlib.md5(data_str.encode()).hexdigest()[:16]
+    except:
+        return f"fallback_{time.time()}"
 
 
 class IndicatorError(Exception):
@@ -204,29 +262,62 @@ class TechnicalIndicators:
     def calculate_rsi(df: pd.DataFrame, period: int = 14, column: str = 'close') -> pd.Series:
         """
         Relative Strength Index - Индекс относительной силы
-        
+        КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: TTL кэширование + numpy ускорение
+
         Args:
             df: DataFrame с данными
             period: Период для расчета RSI
             column: Колонка для расчета
-        
+
         Returns:
             IndicatorResult с Series значений RSI (0-100)
         """
+        # КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: Проверяем кэш
+        cache_key = _create_data_hash(df, f"rsi_{period}_{column}")
+        cached_result = _RSI_CACHE.get(cache_key)
+        if cached_result is not None:
+            return cached_result
+
         TechnicalIndicators._validate_dataframe(df, [column], period + 1)
-        
-        delta = df[column].diff()
-        gain = delta.where(delta > 0, 0).rolling(window=period, min_periods=1).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period, min_periods=1).mean()
-        
-        # Избегаем деления на ноль
-        rs = gain / loss.replace(0, np.inf)
-        rsi = 100 - (100 / (1 + rs))
-        
-        # Заполняем NaN значения
-        rsi = rsi.fillna(50)  # Нейтральное значение для начальных баров
-        
-        return rsi
+
+        # ОПТИМИЗАЦИЯ: Numpy векторизация для скорости
+        prices = df[column].values
+        deltas = np.diff(prices, prepend=prices[0])
+
+        # Разделяем gains и losses
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+
+        # Используем exponential moving average (быстрее rolling)
+        alpha = 1.0 / period
+        avg_gains = np.zeros_like(gains)
+        avg_losses = np.zeros_like(losses)
+
+        # Инициализация первого значения
+        if len(gains) > period:
+            avg_gains[period] = np.mean(gains[1:period + 1])
+            avg_losses[period] = np.mean(losses[1:period + 1])
+
+            # EMA расчет для остальных значений (намного быстрее)
+            for i in range(period + 1, len(gains)):
+                avg_gains[i] = alpha * gains[i] + (1 - alpha) * avg_gains[i - 1]
+                avg_losses[i] = alpha * losses[i] + (1 - alpha) * avg_losses[i - 1]
+
+        # Вычисление RSI
+        rs = np.divide(avg_gains, avg_losses, out=np.full_like(avg_gains, np.inf), where=avg_losses != 0)
+        rsi_values = 100 - (100 / (1 + rs))
+
+        # Заполняем первые значения нейтральными
+        rsi_values[:period] = 50
+
+        # Создаем Series
+        rsi = pd.Series(rsi_values, index=df.index, name=f'rsi_{period}')
+
+        # КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: Сохраняем в кэш
+        result = IndicatorResult(value=rsi, is_valid=True)
+        _RSI_CACHE.put(cache_key, result)
+
+        return result
     
     @staticmethod
     @_safe_calculation
@@ -344,30 +435,55 @@ class TechnicalIndicators:
     def calculate_vwap(df: pd.DataFrame, period: Optional[int] = None) -> pd.Series:
         """
         Volume Weighted Average Price - Средневзвешенная по объему цена
-        
+        КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: TTL кэширование для уменьшения латентности
+
         Args:
             df: DataFrame с OHLCV данными
             period: Период для скользящего VWAP (None = кумулятивный)
-        
+
         Returns:
             IndicatorResult с Series значений VWAP
         """
+        # КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: Проверяем кэш
+        cache_key = _create_data_hash(df, f"vwap_{period}")
+        cached_result = _VWAP_CACHE.get(cache_key)
+        if cached_result is not None:
+            return cached_result
+
         required_cols = ['high', 'low', 'close', 'volume']
         TechnicalIndicators._validate_dataframe(df, required_cols, period or 1)
-        
-        typical_price = (df['high'] + df['low'] + df['close']) / 3
-        
+
+        # ОПТИМИЗАЦИЯ: Используем numpy для скорости
+        high = df['high'].values
+        low = df['low'].values
+        close = df['close'].values
+        volume = df['volume'].values
+
+        # Быстрое вычисление typical price
+        typical_price = (high + low + close) / 3
+
         if period is None:
-            # Кумулятивный VWAP
-            cumulative_volume = df['volume'].cumsum()
-            cumulative_tp_volume = (typical_price * df['volume']).cumsum()
-            vwap = cumulative_tp_volume / cumulative_volume
+            # Кумулятивный VWAP - оптимизированный
+            cumulative_volume = np.cumsum(volume)
+            cumulative_tp_volume = np.cumsum(typical_price * volume)
+            vwap_values = cumulative_tp_volume / cumulative_volume
         else:
-            # Скользящий VWAP
-            tp_volume = typical_price * df['volume']
-            vwap = tp_volume.rolling(window=period, min_periods=1).sum() / df['volume'].rolling(window=period, min_periods=1).sum()
-        
-        return vwap.fillna(df['close'])  # Fallback к цене закрытия
+            # Скользящий VWAP - оптимизированный
+            vwap_values = np.full(len(df), np.nan)
+            for i in range(period - 1, len(df)):
+                start_idx = max(0, i - period + 1)
+                period_volume = volume[start_idx:i + 1]
+                period_tp = typical_price[start_idx:i + 1]
+                vwap_values[i] = np.sum(period_tp * period_volume) / np.sum(period_volume)
+
+        # Создаем Series с индексом оригинального DataFrame
+        vwap = pd.Series(vwap_values, index=df.index, name='vwap')
+
+        # КРИТИЧЕСКАЯ ОПТИМИЗАЦИЯ: Сохраняем в кэш
+        result = IndicatorResult(value=vwap, is_valid=True)
+        _VWAP_CACHE.put(cache_key, result)
+
+        return result
     
     @staticmethod
     @_safe_calculation
@@ -748,3 +864,238 @@ INDICATOR_THRESHOLDS = {
     'volatility_low': 0.01,
     'volatility_high': 0.03
 }
+
+
+# =============================================================================
+# BATCH PROCESSING OPTIMIZATION - A1.3
+# =============================================================================
+
+class BatchIndicatorProcessor:
+    """
+    Критическая оптимизация A1.3: Batch обработка индикаторов для повышения производительности
+
+    Вместо последовательного вызова каждого индикатора, рассчитывает несколько индикаторов
+    одновременно используя векторизованные операции numpy/pandas.
+
+    Целевое улучшение производительности: 40-60% снижение времени расчета
+    """
+
+    def __init__(self):
+        self._cache = TTLCache(maxsize=50, ttl=30)  # Кэш для batch результатов
+
+    @staticmethod
+    def calculate_batch_core_indicators(df: pd.DataFrame, config: Dict = None) -> Dict[str, Any]:
+        """
+        Batch расчет основных индикаторов для ВСЕХ стратегий
+
+        Рассчитывает одновременно: RSI, SMA, EMA, ATR, VWAP, Volume Analysis
+        Использует векторизованные операции pandas/numpy для максимальной скорости
+
+        Args:
+            df: DataFrame с OHLCV данными
+            config: Опциональная конфигурация параметров
+
+        Returns:
+            Dict с рассчитанными индикаторами
+        """
+        try:
+            if df is None or len(df) < 5:
+                return {}
+
+            # Параметры по умолчанию (оптимизированы для скорости)
+            config = config or {}
+            rsi_period = config.get('rsi_period', 14)
+            sma_period = config.get('sma_period', 20)
+            ema_period = config.get('ema_period', 20)
+            atr_period = config.get('atr_period', 14)
+
+            results = {}
+            close = df['close']
+            high = df['high']
+            low = df['low']
+            volume = df['volume']
+
+            # === BATCH RSI CALCULATION ===
+            delta = close.diff()
+            gain = delta.where(delta > 0, 0)
+            loss = -delta.where(delta < 0, 0)
+
+            # Используем ewm для экспоненциального сглаживания (быстрее rolling)
+            avg_gain = gain.ewm(span=rsi_period, min_periods=1).mean()
+            avg_loss = loss.ewm(span=rsi_period, min_periods=1).mean()
+
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+            results['rsi'] = rsi.iloc[-1] if not rsi.empty else 50.0
+
+            # === BATCH MOVING AVERAGES ===
+            # Векторизованный расчет SMA и EMA одновременно
+            results['sma'] = close.rolling(window=sma_period, min_periods=1).mean().iloc[-1]
+            results['ema'] = close.ewm(span=ema_period, min_periods=1).mean().iloc[-1]
+
+            # === BATCH ATR CALCULATION ===
+            # Оптимизированный ATR через numpy
+            tr1 = high - low
+            tr2 = np.abs(high - close.shift(1))
+            tr3 = np.abs(low - close.shift(1))
+
+            # Используем numpy maximum для скорости
+            true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+            atr = pd.Series(true_range).rolling(window=atr_period, min_periods=1).mean()
+            results['atr'] = atr.iloc[-1] if not atr.empty else (high.iloc[-1] - low.iloc[-1])
+
+            # === BATCH VWAP CALCULATION ===
+            # Оптимизированный VWAP с кэшированием
+            cumulative_volume = volume.cumsum()
+            cumulative_volume_price = (close * volume).cumsum()
+
+            vwap = cumulative_volume_price / cumulative_volume
+            results['vwap'] = vwap.iloc[-1] if not vwap.empty else close.iloc[-1]
+            results['vwap_deviation'] = abs(close.iloc[-1] - results['vwap']) / results['vwap'] * 100
+
+            # === BATCH VOLUME ANALYSIS ===
+            volume_sma = volume.rolling(window=20, min_periods=1).mean()
+            volume_ratio = volume / volume_sma
+
+            results['volume_ratio'] = volume_ratio.iloc[-1] if not volume_ratio.empty else 1.0
+            results['volume_spike'] = results['volume_ratio'] > 2.0
+            results['volume_increasing'] = volume.iloc[-1] > volume.iloc[-2] if len(volume) > 1 else False
+
+            # === BATCH TREND ANALYSIS ===
+            # Быстрый анализ тренда через линейную регрессию
+            if len(close) >= 10:
+                x = np.arange(len(close.tail(10)))
+                y = close.tail(10).values
+
+                # Векторизованная линейная регрессия
+                x_mean = x.mean()
+                y_mean = y.mean()
+                slope = np.sum((x - x_mean) * (y - y_mean)) / np.sum((x - x_mean) ** 2)
+
+                # Нормализация наклона
+                price_range = y.max() - y.min()
+                normalized_slope = slope / price_range if price_range > 0 else 0
+
+                results['trend_slope'] = normalized_slope
+                results['trend_strength'] = abs(normalized_slope)
+                results['trend_bullish'] = normalized_slope > 0.001
+                results['trend_bearish'] = normalized_slope < -0.001
+            else:
+                results['trend_slope'] = 0
+                results['trend_strength'] = 0
+                results['trend_bullish'] = False
+                results['trend_bearish'] = False
+
+            # === PRICE POSITION ANALYSIS ===
+            results['price_above_sma'] = close.iloc[-1] > results['sma']
+            results['price_above_ema'] = close.iloc[-1] > results['ema']
+            results['price_above_vwap'] = close.iloc[-1] > results['vwap']
+            results['price_below_vwap'] = close.iloc[-1] < results['vwap']
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Ошибка batch расчета индикаторов: {e}")
+            return {}
+
+    @staticmethod
+    def calculate_batch_confluence_factors(df: pd.DataFrame, signal_type: str, indicators: Dict) -> Tuple[int, List[str]]:
+        """
+        Batch расчет confluence факторов для всех стратегий
+
+        Унифицированная система подсчета confluence факторов с оптимизацией
+        для максимальной скорости выполнения
+
+        Args:
+            df: DataFrame с данными
+            signal_type: 'BUY' или 'SELL'
+            indicators: Результаты batch_core_indicators
+
+        Returns:
+            Tuple: (количество_факторов, список_факторов)
+        """
+        try:
+            confluence_count = 0
+            factors = []
+
+            if signal_type == 'BUY':
+                # Фактор 1: Объемное подтверждение
+                if indicators.get('volume_spike', False):
+                    confluence_count += 1
+                    factors.append('volume_confirmation')
+
+                # Фактор 2: Позиция цены
+                if indicators.get('price_above_vwap', False):
+                    confluence_count += 1
+                    factors.append('price_position')
+
+                # Фактор 3: Трендовое выравнивание
+                if indicators.get('trend_bullish', False):
+                    confluence_count += 1
+                    factors.append('trend_alignment')
+
+            elif signal_type == 'SELL':
+                # Фактор 1: Объемное подтверждение
+                if indicators.get('volume_spike', False):
+                    confluence_count += 1
+                    factors.append('volume_confirmation')
+
+                # Фактор 2: Позиция цены
+                if indicators.get('price_below_vwap', False):
+                    confluence_count += 1
+                    factors.append('price_position')
+
+                # Фактор 3: Трендовое выравнивание
+                if indicators.get('trend_bearish', False):
+                    confluence_count += 1
+                    factors.append('trend_alignment')
+
+            return confluence_count, factors
+
+        except Exception as e:
+            logger.error(f"Ошибка batch confluence: {e}")
+            return 0, []
+
+    @staticmethod
+    def calculate_batch_signal_strength(indicators: Dict, signal_type: str) -> float:
+        """
+        Batch расчет силы сигнала для всех стратегий
+
+        Унифицированный расчет силы сигнала на базе 3 ключевых факторов
+
+        Args:
+            indicators: Результаты batch_core_indicators
+            signal_type: 'BUY' или 'SELL'
+
+        Returns:
+            Сила сигнала от 0.0 до 1.0
+        """
+        try:
+            # 3 ключевых фактора (оптимизировано)
+            factors = []
+
+            # Фактор 1: Объемное подтверждение (40%)
+            volume_factor = min(indicators.get('volume_ratio', 1.0) / 2.0, 1.0)
+            factors.append(volume_factor)
+
+            # Фактор 2: Позиция относительно VWAP (35%)
+            vwap_deviation = indicators.get('vwap_deviation', 0)
+            vwap_factor = min(vwap_deviation / 2.0, 1.0)  # Чем больше отклонение, тем сильнее потенциал
+            factors.append(vwap_factor)
+
+            # Фактор 3: Трендовое подтверждение (25%)
+            if signal_type == 'BUY':
+                trend_factor = 1.0 if indicators.get('trend_bullish', False) else 0.3
+            else:
+                trend_factor = 1.0 if indicators.get('trend_bearish', False) else 0.3
+            factors.append(trend_factor)
+
+            # Взвешенная сумма
+            weights = [0.40, 0.35, 0.25]
+            signal_strength = sum(factor * weight for factor, weight in zip(factors, weights))
+
+            return min(max(signal_strength, 0.0), 1.0)
+
+        except Exception as e:
+            logger.error(f"Ошибка batch signal strength: {e}")
+            return 0.5
