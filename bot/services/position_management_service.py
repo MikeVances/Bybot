@@ -74,7 +74,8 @@ class PositionManagementService:
                     side=api_side,
                     size=trade_amount,
                     entry_price=entry_price,
-                    avg_price=entry_price
+                    avg_price=entry_price,
+                    strategy_name=strategy_name
                 )
                 
                 # Обновляем локальное состояние для совместимости
@@ -189,37 +190,57 @@ class PositionManagementService:
             handle_trading_error(e, context, RecoveryStrategy.SKIP_ITERATION)
             return None
     
-    def _set_stops_if_needed(self, api, stop_loss: Optional[float], 
+    def _set_stops_if_needed(self, api, stop_loss: Optional[float],
                            take_profit: Optional[float]) -> None:
         """
         Установка стоп-лосс и тейк-профит если необходимо
-        
+
         Args:
             api: API экземпляр
             stop_loss: Уровень стоп-лосс
             take_profit: Уровень тейк-профит
         """
         if not (stop_loss or take_profit):
+            self.logger.info("🔄 Стопы не установлены - не переданы параметры SL/TP")
             return
-        
+
         try:
-            # Ждем немного, чтобы позиция точно открылась
-            time.sleep(1)
-            
-            stop_response = api.set_trading_stop(
-                symbol="BTCUSDT",
-                stop_loss=stop_loss,
-                take_profit=take_profit
-            )
-            
-            if stop_response and stop_response.get('retCode') == 0:
-                self.logger.info(f"✅ Стопы установлены: SL=${stop_loss}, TP=${take_profit}")
-            else:
-                error_msg = stop_response.get('retMsg', 'Unknown error') if stop_response else 'No response'
-                self.logger.warning(f"⚠️ Ошибка установки стопов: {error_msg}")
-                
+            # Логируем попытку установки стопов
+            if stop_loss and take_profit:
+                self.logger.info(f"🎯 Устанавливаем стопы: SL=${stop_loss:.2f}, TP=${take_profit:.2f}")
+            elif stop_loss:
+                self.logger.info(f"🛑 Устанавливаем только SL: ${stop_loss:.2f}")
+            elif take_profit:
+                self.logger.info(f"🎯 Устанавливаем только TP: ${take_profit:.2f}")
+
+            # Ждем больше времени для корректного открытия позиции
+            time.sleep(2)
+
+            # Повторные попытки установки стопов (до 3 попыток)
+            max_attempts = 3
+            for attempt in range(max_attempts):
+                stop_response = api.set_trading_stop(
+                    symbol="BTCUSDT",
+                    stop_loss=stop_loss,
+                    take_profit=take_profit
+                )
+
+                if stop_response and stop_response.get('retCode') == 0:
+                    self.logger.info(f"✅ Стопы установлены успешно (попытка {attempt + 1})")
+                    return
+                else:
+                    error_msg = stop_response.get('retMsg', 'Unknown error') if stop_response else 'No response'
+                    self.logger.warning(f"⚠️ Ошибка установки стопов (попытка {attempt + 1}): {error_msg}")
+
+                    if attempt < max_attempts - 1:
+                        self.logger.info(f"🔄 Повторная попытка через 1 секунду...")
+                        time.sleep(1)
+
+            # Если все попытки неудачны
+            self.logger.error(f"❌ Не удалось установить стопы после {max_attempts} попыток")
+
         except Exception as e:
-            self.logger.error(f"❌ Ошибка установки стопов: {e}")
+            self.logger.error(f"❌ Критическая ошибка установки стопов: {e}")
     
     def _calculate_pnl(self, state, exit_price: float) -> float:
         """

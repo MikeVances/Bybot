@@ -147,51 +147,67 @@ class NeuralTrader:
             # Рыночные данные с улучшенной обработкой
             timeframes = ['1m', '5m', '15m', '1h']
             for tf in timeframes:
-                if tf in market_data and market_data[tf] is not None and not market_data[tf].empty:
-                    df = market_data[tf].tail(20).copy()  # Увеличиваем окно
-                    
-                    # Конвертируем в числовой формат
-                    for col in ['open', 'high', 'low', 'close', 'volume']:
-                        if col in df.columns:
-                            df[col] = pd.to_numeric(df[col], errors='coerce')
-                    
-                    # Убираем NaN
-                    df = df.dropna()
-                    
-                    if len(df) > 5:  # Минимум 5 свечей для расчета
-                        # Расширенные технические индикаторы
-                        close_prices = df['close'].values
-                        volumes = df['volume'].values
-                        
-                        # Ценовые характеристики
-                        price_change = self._safe_divide(close_prices[-1] - close_prices[0], close_prices[0])
-                        volatility = self._safe_divide(df['high'].max() - df['low'].min(), close_prices[-1])
-                        
-                        # Объемные характеристики
-                        volume_trend = self._safe_divide(volumes[-1], np.mean(volumes[:-1])) if len(volumes) > 1 else 1
-                        volume_std = np.std(volumes) / (np.mean(volumes) + 1e-8)
-                        
-                        # Трендовые характеристики
-                        sma_5 = np.mean(close_prices[-5:])
-                        sma_10 = np.mean(close_prices[-10:]) if len(close_prices) >= 10 else sma_5
-                        trend_strength = self._safe_divide(sma_5 - sma_10, sma_10)
-                        
-                        # Волатильность и моментум
-                        returns = np.diff(close_prices) / close_prices[:-1]
-                        volatility_std = np.std(returns) if len(returns) > 0 else 0
-                        momentum = self._safe_divide(close_prices[-1] - close_prices[-3], close_prices[-3]) if len(close_prices) >= 3 else 0
-                        
-                        # Нормализация и клиппинг
-                        features.extend([
-                            np.clip(price_change, -0.2, 0.2),      # ±20%
-                            np.clip(volatility, 0, 0.3),           # До 30%
-                            np.clip(volume_trend, 0.1, 5.0),       # 0.1x - 5x
-                            np.clip(volume_std, 0, 2.0),           # До 200%
-                            np.clip(trend_strength, -0.1, 0.1),    # ±10%
-                            np.clip(volatility_std, 0, 0.1),       # До 10%
-                            np.clip(momentum, -0.1, 0.1),          # ±10%
-                            1 if close_prices[-1] > close_prices[0] else 0  # Направление
-                        ])
+                if tf in market_data and market_data[tf] is not None:
+                    # Преобразуем данные в DataFrame если нужно
+                    tf_data = market_data[tf]
+                    if isinstance(tf_data, dict):
+                        # Конвертируем dict в DataFrame
+                        try:
+                            tf_data = pd.DataFrame(tf_data)
+                        except Exception as e:
+                            self.logger.warning(f"Не удалось конвертировать данные {tf} в DataFrame: {e}")
+                            features.extend([0] * 8)
+                            continue
+
+                    if isinstance(tf_data, pd.DataFrame) and not tf_data.empty:
+                        df = tf_data.tail(20).copy()  # Увеличиваем окно
+
+                        # Конвертируем в числовой формат
+                        for col in ['open', 'high', 'low', 'close', 'volume']:
+                            if col in df.columns:
+                                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                        # Убираем NaN
+                        df = df.dropna()
+
+                        if len(df) > 5:  # Минимум 5 свечей для расчета
+                            # Расширенные технические индикаторы
+                            close_prices = df['close'].values
+                            volumes = df['volume'].values if 'volume' in df.columns else np.ones(len(df))
+
+                            # Ценовые характеристики
+                            price_change = self._safe_divide(close_prices[-1] - close_prices[0], close_prices[0])
+                            high_values = df['high'].values if 'high' in df.columns else close_prices
+                            low_values = df['low'].values if 'low' in df.columns else close_prices
+                            volatility = self._safe_divide(high_values.max() - low_values.min(), close_prices[-1])
+
+                            # Объемные характеристики
+                            volume_trend = self._safe_divide(volumes[-1], np.mean(volumes[:-1])) if len(volumes) > 1 else 1
+                            volume_std = np.std(volumes) / (np.mean(volumes) + 1e-8)
+
+                            # Трендовые характеристики
+                            sma_5 = np.mean(close_prices[-5:])
+                            sma_10 = np.mean(close_prices[-10:]) if len(close_prices) >= 10 else sma_5
+                            trend_strength = self._safe_divide(sma_5 - sma_10, sma_10)
+
+                            # Волатильность и моментум
+                            returns = np.diff(close_prices) / close_prices[:-1]
+                            volatility_std = np.std(returns) if len(returns) > 0 else 0
+                            momentum = self._safe_divide(close_prices[-1] - close_prices[-3], close_prices[-3]) if len(close_prices) >= 3 else 0
+
+                            # Нормализация и клиппинг
+                            features.extend([
+                                np.clip(price_change, -0.2, 0.2),      # ±20%
+                                np.clip(volatility, 0, 0.3),           # До 30%
+                                np.clip(volume_trend, 0.1, 5.0),       # 0.1x - 5x
+                                np.clip(volume_std, 0, 2.0),           # До 200%
+                                np.clip(trend_strength, -0.1, 0.1),    # ±10%
+                                np.clip(volatility_std, 0, 0.1),       # До 10%
+                                np.clip(momentum, -0.1, 0.1),          # ±10%
+                                1 if close_prices[-1] > close_prices[0] else 0  # Направление
+                            ])
+                        else:
+                            features.extend([0] * 8)
                     else:
                         features.extend([0] * 8)
                 else:
@@ -396,7 +412,47 @@ class NeuralTrader:
             # Возвращаем равномерное распределение в случае ошибки
             uniform_output = np.ones((1, self.output_size)) / self.output_size
             return uniform_output, {'input': x}
-    
+
+    def predict(self, x: np.ndarray) -> np.ndarray:
+        """
+        Публичный метод для предсказания (обертка над forward_improved)
+
+        Args:
+            x: Входные данные shape (batch_size, input_size)
+
+        Returns:
+            Предсказания shape (batch_size, output_size)
+        """
+        try:
+            # Валидация входных данных
+            if x is None:
+                raise ValueError("Входные данные не могут быть None")
+
+            if not isinstance(x, np.ndarray):
+                x = np.array(x, dtype=np.float32)
+
+            # Проверяем размерность
+            if len(x.shape) == 1:
+                x = x.reshape(1, -1)
+
+            if x.shape[1] != self.input_size:
+                self.logger.warning(f"Неожиданный размер входных данных: {x.shape[1]}, ожидался: {self.input_size}")
+                # Обрезаем или дополняем нулями
+                if x.shape[1] > self.input_size:
+                    x = x[:, :self.input_size]
+                else:
+                    x = np.pad(x, ((0, 0), (0, self.input_size - x.shape[1])), mode='constant')
+
+            # Делаем предсказание (inference mode)
+            prediction, _ = self.forward_improved(x, training=False)
+
+            return prediction
+
+        except Exception as e:
+            self.logger.error(f"Ошибка предсказания: {e}")
+            # Возвращаем равномерное распределение
+            return np.ones((1, self.output_size)) / self.output_size
+
     def predict_strategy_performance(self, market_data: Dict, strategy_signals: Dict) -> Dict[str, float]:
         """Предсказание производительности стратегий с улучшенной обработкой"""
         try:

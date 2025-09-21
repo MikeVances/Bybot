@@ -35,6 +35,7 @@ class PositionInfo:
     avg_price: float = 0.0
     leverage: float = 1.0
     margin: float = 0.0
+    strategy_name: Optional[str] = None  # Стратегия-владелец позиции
     
     @property
     def is_active(self) -> bool:
@@ -105,14 +106,15 @@ class ThreadSafeBotState:
         with self._lock:
             return self._positions.get(symbol)
     
-    def set_position(self, symbol: str, side: Optional[str], size: float, 
-                    entry_price: float = 0.0, avg_price: float = 0.0, 
-                    unrealized_pnl: float = 0.0, leverage: float = 1.0) -> None:
+    def set_position(self, symbol: str, side: Optional[str], size: float,
+                    entry_price: float = 0.0, avg_price: float = 0.0,
+                    unrealized_pnl: float = 0.0, leverage: float = 1.0,
+                    strategy_name: Optional[str] = None) -> None:
         """Установка информации о позиции"""
         with self._lock:
             if symbol not in self._positions:
                 self._positions[symbol] = PositionInfo(symbol=symbol)
-            
+
             pos = self._positions[symbol]
             pos.side = PositionSide(side) if side else None
             pos.size = size
@@ -120,6 +122,7 @@ class ThreadSafeBotState:
             pos.avg_price = avg_price or entry_price
             pos.unrealized_pnl = unrealized_pnl
             pos.leverage = leverage
+            pos.strategy_name = strategy_name
             pos.last_update = datetime.now()
             
             # Если позиция закрыта
@@ -195,6 +198,7 @@ class ThreadSafeBotState:
             pos.avg_price = 0.0
             pos.unrealized_pnl = 0.0
             pos.realized_pnl = realized_pnl
+            pos.strategy_name = None  # Очищаем владельца
             
             self.logger.info(f"📊 Позиция закрыта {symbol}: P&L={realized_pnl:.2f}")
             return closed_position
@@ -225,6 +229,7 @@ class ThreadSafeBotState:
             pos.avg_price = 0.0
             pos.unrealized_pnl = 0.0
             pos.realized_pnl = 0.0
+            pos.strategy_name = None  # Очищаем владельца
             pos.last_update = datetime.now()
             
             self.logger.info(f"🧹 Позиция принудительно очищена: {symbol}")

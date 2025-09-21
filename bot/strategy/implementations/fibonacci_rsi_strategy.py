@@ -125,7 +125,7 @@ class FibonacciRSIStrategy(BaseStrategy):
         # Устанавливаем минимальное R:R соотношение для согласованности
         self.config.min_risk_reward_ratio = 0.8  # Снижаем для лучшей совместимости
         
-        self.logger.info(f"🚀 Инициализирована стратегия {self.config.strategy_name} v{self.config.strategy_version}")
+        self.logger.debug(f"🚀 Инициализирована стратегия {self.config.strategy_name} v{self.config.strategy_version}")
         self.logger.info(f"🎯 Fibonacci RSI Volume стратегия инициализирована")
         self.logger.info(f"📊 Параметры: fast_tf={self.config.fast_tf}, slow_tf={self.config.slow_tf}, "
                         f"ema_short={self.config.ema_short}, ema_long={self.config.ema_long}")

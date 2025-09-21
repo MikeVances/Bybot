@@ -12,7 +12,10 @@ import threading
 from bot.exchange.api_adapter import create_trading_bot_adapter
 from bot.ai import NeuralIntegration
 from bot.risk import RiskManager
-from config import get_strategy_config, ENABLED_STRATEGIES, USE_TESTNET
+from config import get_strategy_config, ACTIVE_STRATEGIES, USE_TESTNET
+
+# Алиас для совместимости
+ENABLED_STRATEGIES = ACTIVE_STRATEGIES
 
 # Импорты сервисов
 from bot.services.notification_service import get_notification_service
@@ -22,7 +25,7 @@ from bot.services.strategy_execution_service import get_strategy_service
 
 # Импорты безопасности
 from bot.core.secure_logger import get_secure_logger
-from bot.core.thread_safe_state import BotState
+from bot.core.thread_safe_state import get_bot_state
 
 
 class TradingOrchestrator:

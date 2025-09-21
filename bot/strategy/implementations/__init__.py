@@ -9,10 +9,12 @@ from .volume_vwap_strategy import VolumeVWAPStrategy
 from .cumdelta_sr_strategy import CumDeltaSRStrategy
 from .multitf_volume_strategy import MultiTFVolumeStrategy
 from .fibonacci_rsi_strategy import FibonacciRSIStrategy
+from .range_trading_strategy import RangeTradingStrategy
 
 __all__ = [
     "VolumeVWAPStrategy",
     "CumDeltaSRStrategy",
     "MultiTFVolumeStrategy",
-    "FibonacciRSIStrategy"
+    "FibonacciRSIStrategy",
+    "RangeTradingStrategy"
 ]

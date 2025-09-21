@@ -701,6 +701,12 @@ class TechnicalIndicators:
         except IndicatorError as e:
             return False, str(e)
 
+    # Алиасы для обратной совместимости
+    @staticmethod
+    def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+        """Алиас для calculate_atr_safe для обратной совместимости"""
+        return TechnicalIndicators.calculate_atr_safe(df, period)
+
 
 # =========================================================================
 # КОНСТАНТЫ И ПРЕДУСТАНОВКИ

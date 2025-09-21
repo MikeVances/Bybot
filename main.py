@@ -111,113 +111,58 @@ class StrategyManager:
             version_info = get_version_info()
             self.logger.info(f"📦 Базовая архитектура: v{version_info['version']}")
             
-            # 3. Создаем стратегии
-            
-            # VolumeVWAP стратегия (консервативная)
+            # 3. Читаем список активных стратегий
             try:
-                conservative_vwap = create_conservative_volume_vwap()
-                self.strategies['volume_vwap_conservative'] = conservative_vwap
-                self.logger.info("✅ VolumeVWAP (консервативная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания консервативной VolumeVWAP: {e}")
-            
-            # VolumeVWAP стратегия (агрессивная)
-            try:
-                aggressive_vwap = create_aggressive_volume_vwap()
-                self.strategies['volume_vwap_aggressive'] = aggressive_vwap
-                self.logger.info("✅ VolumeVWAP (агрессивная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания агрессивной VolumeVWAP: {e}")
-            
-            # VolumeVWAP стратегия (стандартная)
-            try:
-                default_vwap = create_volume_vwap_strategy()
-                self.strategies['volume_vwap_default'] = default_vwap
-                self.logger.info("✅ VolumeVWAP (стандартная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания стандартной VolumeVWAP: {e}")
-            
-            # CumDelta SR стратегия (стандартная)
-            try:
-                default_cumdelta = create_cumdelta_sr_strategy()
-                self.strategies['cumdelta_sr_default'] = default_cumdelta
-                self.logger.info("✅ CumDelta SR (стандартная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания стандартной CumDelta SR: {e}")
-            
-            # CumDelta SR стратегия (консервативная)
-            try:
-                conservative_cumdelta = create_conservative_cumdelta_sr()
-                self.strategies['cumdelta_sr_conservative'] = conservative_cumdelta
-                self.logger.info("✅ CumDelta SR (консервативная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания консервативной CumDelta SR: {e}")
-            
-            # CumDelta SR стратегия (агрессивная)
-            try:
-                aggressive_cumdelta = create_aggressive_cumdelta_sr()
-                self.strategies['cumdelta_sr_aggressive'] = aggressive_cumdelta
-                self.logger.info("✅ CumDelta SR (агрессивная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания агрессивной CumDelta SR: {e}")
-            
-            # MultiTF Volume стратегия (стандартная)
-            try:
-                default_multitf = create_multitf_volume_strategy()
-                self.strategies['multitf_volume_default'] = default_multitf
-                self.logger.info("✅ MultiTF Volume (стандартная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания стандартной MultiTF Volume: {e}")
-            
-            # MultiTF Volume стратегия (консервативная)
-            try:
-                conservative_multitf = create_conservative_multitf_volume()
-                self.strategies['multitf_volume_conservative'] = conservative_multitf
-                self.logger.info("✅ MultiTF Volume (консервативная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания консервативной MultiTF Volume: {e}")
-            
-            # MultiTF Volume стратегия (агрессивная)
-            try:
-                aggressive_multitf = create_aggressive_multitf_volume()
-                self.strategies['multitf_volume_aggressive'] = aggressive_multitf
-                self.logger.info("✅ MultiTF Volume (агрессивная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания агрессивной MultiTF Volume: {e}")
-            
-            # Fibonacci RSI стратегия (стандартная)
-            try:
-                default_fibonacci = create_fibonacci_rsi_strategy()
-                self.strategies['fibonacci_rsi_default'] = default_fibonacci
-                self.logger.info("✅ Fibonacci RSI (стандартная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания стандартной Fibonacci RSI: {e}")
-            
-            # Fibonacci RSI стратегия (консервативная)
-            try:
-                conservative_fibonacci = create_conservative_fibonacci_rsi()
-                self.strategies['fibonacci_rsi_conservative'] = conservative_fibonacci
-                self.logger.info("✅ Fibonacci RSI (консервативная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания консервативной Fibonacci RSI: {e}")
-            
-            # Fibonacci RSI стратегия (агрессивная)
-            try:
-                aggressive_fibonacci = create_aggressive_fibonacci_rsi()
-                self.strategies['fibonacci_rsi_aggressive'] = aggressive_fibonacci
-                self.logger.info("✅ Fibonacci RSI (агрессивная) инициализирована")
-            except Exception as e:
-                self.logger.error(f"❌ Ошибка создания агрессивной Fibonacci RSI: {e}")
-            
-            # 4. Определяем активные стратегии из конфигурации
-            configured_strategies = getattr(config, 'ACTIVE_STRATEGIES', ['volume_vwap_default'])
-            
+                with open("bot/strategy/active_strategies.txt") as f:
+                    configured_strategies = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            except FileNotFoundError:
+                configured_strategies = getattr(config, 'ACTIVE_STRATEGIES', ['volume_vwap_default'])
+                self.logger.warning("⚠️ Файл active_strategies.txt не найден, используем fallback из config")
+
+            self.logger.info(f"📋 Будут созданы только активные стратегии: {configured_strategies}")
+
+            # 4. Создаем ТОЛЬКО активные стратегии
             for strategy_name in configured_strategies:
-                if strategy_name in self.strategies:
+                try:
+                    # Определяем factory функцию для каждой стратегии
+                    if strategy_name == 'volume_vwap_default':
+                        strategy_instance = create_volume_vwap_strategy()
+                    elif strategy_name == 'volume_vwap_conservative':
+                        strategy_instance = create_conservative_volume_vwap()
+                    elif strategy_name == 'volume_vwap_aggressive':
+                        strategy_instance = create_aggressive_volume_vwap()
+                    elif strategy_name == 'cumdelta_sr_default':
+                        strategy_instance = create_cumdelta_sr_strategy()
+                    elif strategy_name == 'cumdelta_sr_conservative':
+                        strategy_instance = create_conservative_cumdelta_sr()
+                    elif strategy_name == 'cumdelta_sr_aggressive':
+                        strategy_instance = create_aggressive_cumdelta_sr()
+                    elif strategy_name == 'multitf_volume_default':
+                        strategy_instance = create_multitf_volume_strategy()
+                    elif strategy_name == 'multitf_volume_conservative':
+                        strategy_instance = create_conservative_multitf_volume()
+                    elif strategy_name == 'multitf_volume_aggressive':
+                        strategy_instance = create_aggressive_multitf_volume()
+                    elif strategy_name == 'fibonacci_rsi_default':
+                        strategy_instance = create_fibonacci_rsi_strategy()
+                    elif strategy_name == 'fibonacci_rsi_conservative':
+                        strategy_instance = create_conservative_fibonacci_rsi()
+                    elif strategy_name == 'fibonacci_rsi_aggressive':
+                        strategy_instance = create_aggressive_fibonacci_rsi()
+                    elif strategy_name == 'range_trading_default':
+                        from bot.strategy.implementations.range_trading_strategy import create_range_trading_strategy
+                        strategy_instance = create_range_trading_strategy()
+                    else:
+                        self.logger.warning(f"⚠️ Неизвестная стратегия '{strategy_name}', пропускаем")
+                        continue
+
+                    # Добавляем созданную стратегию
+                    self.strategies[strategy_name] = strategy_instance
                     self.active_strategies.append(strategy_name)
-                    self.logger.info(f"🎯 Стратегия '{strategy_name}' активирована")
-                else:
-                    self.logger.warning(f"⚠️ Стратегия '{strategy_name}' не найдена")
+                    self.logger.info(f"✅ Стратегия '{strategy_name}' создана и активирована")
+
+                except Exception as e:
+                    self.logger.error(f"❌ Ошибка создания стратегии '{strategy_name}': {e}")
             
             if not self.active_strategies:
                 # Fallback - активируем стандартную стратегию
@@ -545,7 +490,18 @@ def main():
     logger.info('='*60)
     logger.info('🚀 ЗАПУСК ТОРГОВОГО БОТА v2.0 С НОВОЙ АРХИТЕКТУРОЙ СТРАТЕГИЙ')
     logger.info('='*60)
-    
+
+    # 🔒 Проверяем единственность экземпляра
+    try:
+        from bot.core.singleton import ensure_single_instance
+        if not ensure_single_instance("trading_bot_main"):
+            logger.error("❌ Торговый бот уже запущен!")
+            logger.error("   Для принудительной остановки используйте: python -c 'from bot.core.singleton import kill_existing_bots; kill_existing_bots()'")
+            return
+        logger.info("✅ Singleton проверка пройдена")
+    except ImportError as e:
+        logger.warning(f"⚠️  Singleton система недоступна: {e}")
+
     # Настраиваем обработчики сигналов
     setup_signal_handlers()
     
@@ -567,14 +523,9 @@ def main():
                 telegram_bot = TelegramBot(token=config.TELEGRAM_TOKEN)
                 logger.info('✅ Telegram бот инициализирован')
                 
-                # Запускаем Telegram бота в отдельном потоке СРАЗУ
-                telegram_thread = threading.Thread(
-                    target=telegram_bot.start,
-                    name="TelegramThread",
-                    daemon=True
-                )
-                threads.append(telegram_thread)
-                telegram_thread.start()
+                # Запускаем Telegram бота напрямую (без двойного тредирования)
+                telegram_bot._is_running = True
+                telegram_bot._run_in_thread()
                 logger.info('✅ Telegram бот запущен')
                 
                 # Даем время Telegram боту запуститься
@@ -619,10 +570,16 @@ def main():
         logger.info(f'🎯 Главный процесс: все {len(threads)} потоков запущены')
         
         # Основной цикл мониторинга
+        # Даем системе время на полную инициализацию
+        time.sleep(10)
+
         while not shutdown_event.is_set():
-            # Проверяем здоровье системы каждые 30 секунд
-            if not health_check():
-                logger.warning("⚠️ Обнаружены проблемы со здоровьем системы")
+            # Проверяем здоровье системы каждые 30 секунд, но только после инициализации
+            try:
+                if not health_check():
+                    logger.debug("⚠️ Система еще инициализируется или найдены проблемы")
+            except Exception as e:
+                logger.debug(f"Health check error: {e}")
             
             # Проверяем живость потоков
             for thread in threads:

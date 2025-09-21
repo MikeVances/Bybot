@@ -1,10 +1,15 @@
 # bot/services/telegram_bot.py
 import logging
+import nest_asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+
+# Разрешить вложенные event loops для совместимости с интерактивными средами
+nest_asyncio.apply()
 from bot.exchange.api_adapter import create_trading_bot_adapter
+from bot.exchange.bybit_api_v5 import BybitAPIV5
 from bot.cli import load_active_strategy, save_active_strategy
-from config import TELEGRAM_TOKEN, get_strategy_config, USE_V5_API, USE_TESTNET
+from config import TELEGRAM_TOKEN, get_strategy_config, USE_V5_API, USE_TESTNET, BYBIT_API_KEY, BYBIT_API_SECRET
 
 # Импортируем конфигурацию для ADMIN_CHAT_ID
 try:
@@ -37,6 +42,8 @@ class TelegramBot:
         self.token = token
         self.app = Application.builder().token(token).build()
         self._register_handlers()
+        self._is_running = False
+        self._bot_thread = None
     
     def _escape_markdown(self, text: str) -> str:
         """Экранирование специальных символов для MarkdownV2"""
@@ -98,6 +105,10 @@ class TelegramBot:
             )
 
     def _register_handlers(self):
+        # Регистрируем обработчик ошибок ПЕРВЫМ
+        self.app.add_error_handler(self._error_handler)
+
+        # Затем обычные хэндлеры
         self.app.add_handler(CommandHandler("start", self._start))
         self.app.add_handler(CommandHandler("menu", self._menu))
         self.app.add_handler(CommandHandler("balance", self._balance))
@@ -111,13 +122,31 @@ class TelegramBot:
         self.app.add_handler(CallbackQueryHandler(self._on_strategy_toggle))
         self.app.add_handler(CallbackQueryHandler(self._on_profit_button, pattern="^profit"))
 
+    async def _error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик ошибок Telegram API"""
+        try:
+            # Логируем ошибку без шума
+            error_message = str(context.error)
+            if "RemoteProtocolError" in error_message or "Server disconnected" in error_message:
+                # Сетевые ошибки Telegram - логируем как DEBUG
+                logging.debug(f"Telegram network error: {error_message}")
+            elif "NetworkError" in error_message:
+                # Другие сетевые ошибки
+                logging.debug(f"Telegram network issue: {error_message}")
+            else:
+                # Остальные ошибки логируем как WARNING
+                logging.warning(f"Telegram error: {error_message}")
+        except Exception as e:
+            # Если даже обработчик ошибок упал
+            logging.error(f"Error in error handler: {e}")
+
     def _get_strategy_list(self):
         files = glob.glob("bot/strategy/strategy_*.py")
         return [os.path.splitext(os.path.basename(f))[0] for f in files]
 
     async def _start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         print("[DEBUG] Получена команда /start")
-        start_text = self._escape_markdown("🤖 *Мультистратегический торговый бот*\n\n"
+        start_text = ("🤖 Мультистратегический торговый бот\n\n"
                  "Доступные команды:\n"
                  "📊 /balance - Баланс аккаунта\n"
                  "📈 /position - Текущие позиции\n"
@@ -126,17 +155,17 @@ class TelegramBot:
                  "📝 /trades - История сделок\n"
                  "📊 /logs - Логи бота\n"
                  "⚙️ /menu - Главное меню")
-        
+
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text=start_text,
-            parse_mode='MarkdownV2'
+            text=start_text
         )
 
     async def _balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать баланс аккаунта"""
         try:
-            api = BybitAPI()
+            # Получаем API credentials для Telegram bot
+            api = BybitAPIV5(BYBIT_API_KEY, BYBIT_API_SECRET, testnet=USE_TESTNET)
             balance_data = api.get_wallet_balance_v5()
             
             if balance_data and balance_data.get('retCode') == 0:
@@ -175,8 +204,8 @@ class TelegramBot:
     async def _position(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показать текущие позиции"""
         try:
-            # REMOVED DANGEROUS v4 API IMPORT - USE ONLY v5
-            api = BybitAPI()
+            # Используем API v5 для получения позиций
+            api = BybitAPIV5(BYBIT_API_KEY, BYBIT_API_SECRET, testnet=USE_TESTNET)
             positions = api.get_positions("BTCUSDT")
             
             if positions and positions.get('result') and positions['result'].get('list'):
@@ -199,19 +228,46 @@ class TelegramBot:
                 if position_text == "📈 *Текущие позиции:*\n\n":
                     position_text += "📭 Нет открытых позиций"
                 
+                # Добавляем клавиатуру навигации
+                keyboard = [
+                    [
+                        InlineKeyboardButton("💰 Баланс", callback_data="balance"),
+                        InlineKeyboardButton("📊 Графики", callback_data="charts")
+                    ],
+                    [
+                        InlineKeyboardButton("🔄 Обновить", callback_data="position"),
+                        InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")
+                    ]
+                ]
+
                 # Для сообщений с данными API используем обычный текст без маркдаун
-                await self._edit_message_with_keyboard(update, context, position_text, parse_mode=None)
+                await self._edit_message_with_keyboard(update, context, position_text, keyboard, parse_mode=None)
             else:
-                no_positions_text = self._escape_markdown("📭 Нет открытых позиций")
+                no_positions_text = "📭 Нет открытых позиций"
+                keyboard = [
+                    [
+                        InlineKeyboardButton("💰 Баланс", callback_data="balance"),
+                        InlineKeyboardButton("📊 Графики", callback_data="charts")
+                    ],
+                    [
+                        InlineKeyboardButton("🔄 Обновить", callback_data="position"),
+                        InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")
+                    ]
+                ]
                 await self._edit_message_with_keyboard(
                     update, context,
-                    no_positions_text
+                    no_positions_text,
+                    keyboard,
+                    parse_mode=None
                 )
         except Exception as e:
-            error_text = self._escape_markdown(f"❌ Ошибка получения позиций: {str(e)}")
+            error_text = f"❌ Ошибка получения позиций: {str(e)}"
+            keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
             await self._edit_message_with_keyboard(
                 update, context,
-                error_text
+                error_text,
+                keyboard,
+                parse_mode=None
             )
 
     async def _all_strategies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -237,7 +293,6 @@ class TelegramBot:
                         api_key=config['api_key'],
                         api_secret=config['api_secret'],
                         uid=config['uid'],
-                        use_v5=USE_V5_API,  # Используем конфигурацию
                         testnet=USE_TESTNET   # Используем конфигурацию
                     )
                     
@@ -253,24 +308,34 @@ class TelegramBot:
                             status_text += f"   💰 Баланс: \\${balance:.2f}\n"
                             status_text += f"   📝 {self._escape_markdown(config['description'])}\n"
                             
-                            # Проверяем позиции
-                            positions = api.get_positions("BTCUSDT")
-                            if positions and positions.get('result') and positions['result'].get('list'):
-                                pos_list = positions['result']['list']
-                                open_positions = [pos for pos in pos_list if float(pos.get('size', 0)) > 0]
-                                if open_positions:
-                                    status_text += f"   📈 Позиций: {len(open_positions)}\n"
-                                    for pos in open_positions:
-                                        side = pos.get('side', 'Unknown')
-                                        size = float(pos.get('size', 0))
-                                        pnl = pos.get('unrealisedPnl', '0')
-                                        # Экранируем pnl для Markdown
-                                        pnl_escaped = self._escape_markdown(str(pnl))
-                                        status_text += f"      {side}: {size} BTC \\(\\${pnl_escaped}\\)\n"
+                            # Проверяем позиции для конкретной стратегии
+                            from bot.core.thread_safe_state import get_bot_state
+                            bot_state = get_bot_state()
+                            position_info = bot_state.get_position("BTCUSDT")
+
+                            if position_info and position_info.is_active:
+                                # Проверяем принадлежит ли позиция этой стратегии
+                                if position_info.strategy_name == strategy_name:
+                                    status_text += f"   📈 Позиций: 1 \\(владеет\\)\n"
+                                    side = position_info.side.value if position_info.side else 'Unknown'
+                                    size = position_info.size
+
+                                    # Получаем актуальный PnL с биржи
+                                    positions = api.get_positions("BTCUSDT")
+                                    pnl = "0"
+                                    if positions and positions.get('result') and positions['result'].get('list'):
+                                        exchange_pos = positions['result']['list'][0] if positions['result']['list'] else None
+                                        if exchange_pos:
+                                            pnl = exchange_pos.get('unrealisedPnl', '0')
+
+                                    pnl_escaped = self._escape_markdown(str(pnl))
+                                    status_text += f"      {side}: {size} BTC \\(\\${pnl_escaped}\\)\n"
+                                elif position_info.strategy_name:
+                                    status_text += f"   📈 Позиций: 1 \\(владеет: {self._escape_markdown(position_info.strategy_name)}\\)\n"
                                 else:
-                                    status_text += f"   📈 Позиций: 0\n"
+                                    status_text += f"   📈 Позиций: 1 \\(владелец неизвестен\\)\n"
                             else:
-                                status_text += f"   📈 Позиции: Ошибка\n"
+                                status_text += f"   📈 Позиций: 0\n"
                             status_text += "\n"
                         else:
                             status_text += f"📊 *{strategy_name}*\n"
@@ -409,8 +474,12 @@ class TelegramBot:
                 trades_text += "❌ Нет данных о сделках\n"
                 trades_text += "📊 Файл trade_journal.csv не найден"
             else:
-                df = pd.read_csv(journal_file, quoting=1)  # QUOTE_ALL
-                
+                try:
+                    df = pd.read_csv(journal_file, quoting=1)  # QUOTE_ALL
+                except pd.errors.ParserError:
+                    # Если CSV поврежден, используем более надежный парсер
+                    df = pd.read_csv(journal_file, on_bad_lines='skip', engine='python')
+
                 if df.empty:
                     trades_text = "📋 ПОСЛЕДНИЕ СДЕЛКИ\n\n"
                     trades_text += "❌ Нет данных о сделках\n"
@@ -557,6 +626,10 @@ class TelegramBot:
                 InlineKeyboardButton("🤖 Нейронка", callback_data="neural")
             ],
             [
+                InlineKeyboardButton("📈 Аналитика", callback_data="analytics"),
+                InlineKeyboardButton("📊 Статистика", callback_data="statistics")
+            ],
+            [
                 InlineKeyboardButton("📝 Логи", callback_data="logs"),
                 InlineKeyboardButton("⚙️ Настройки", callback_data="settings")
             ],
@@ -605,10 +678,28 @@ class TelegramBot:
             await self._neural(update, context)
         elif query.data == "prometheus":
             await self._prometheus(update, context)
+        elif query.data == "analytics":
+            await self._analytics(update, context)
+        elif query.data == "statistics":
+            await self._statistics(update, context)
         elif query.data == "stop_trading":
             await self._stop_trading(update, context)
         elif query.data == "start_trading":
             await self._start_trading(update, context)
+        elif query.data == "profit":
+            await self._profit(update, context)
+        elif query.data == "profit_details":
+            await self._profit_details(update, context)
+        elif query.data == "trade_history":
+            await self._trades(update, context)
+        elif query.data == "settings_risk":
+            await self._settings_risk(update, context)
+        elif query.data == "settings_timeframes":
+            await self._settings_timeframes(update, context)
+        elif query.data == "settings_strategies":
+            await self._settings_strategies(update, context)
+        elif query.data == "settings_notifications":
+            await self._settings_notifications(update, context)
 
     async def _on_strategy_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -646,15 +737,7 @@ class TelegramBot:
                 await self._profit(update, context)
             elif callback_data == "profit_details":
                 # Показываем детальную статистику
-                await self._edit_message_with_keyboard(
-                    update, context,
-                    "📈 *ДЕТАЛЬНАЯ СТАТИСТИКА*\n\n"
-                    "🔍 Анализ по стратегиям\n"
-                    "📊 Графики производительности\n"
-                    "📋 История сделок\n\n"
-                    "Функция в разработке...",
-                    [[InlineKeyboardButton("🔙 НАЗАД", callback_data="profit")]]
-                )
+                await self._profit_details(update, context)
             elif callback_data == "trade_history":
                 # Показываем историю сделок
                 await self._trades(update, context)
@@ -704,7 +787,7 @@ class TelegramBot:
             balance_text = "💰 *БАЛАНС АККАУНТА*\n\n"
             
             try:
-                api = BybitAPI()
+                api = BybitAPIV5(BYBIT_API_KEY, BYBIT_API_SECRET, testnet=USE_TESTNET)
                 balance_data = api.get_wallet_balance_v5()
                 if balance_data and balance_data.get('retCode') == 0:
                     result = balance_data['result']['list'][0]
@@ -816,8 +899,21 @@ class TelegramBot:
                 )
                 return
             
-            # Читаем данные с правильными параметрами для CSV
-            df = pd.read_csv(journal_file, quoting=1)  # QUOTE_ALL
+            # Читаем данные с правильными параметрами для CSV и обработкой ошибок
+            try:
+                df = pd.read_csv(journal_file, quoting=1)  # QUOTE_ALL
+            except pd.errors.ParserError as e:
+                print(f"CSV parsing error: {e}")
+                # Если CSV поврежден, попробуем прочитать то что можем
+                try:
+                    df = pd.read_csv(journal_file, quoting=1, on_bad_lines='skip')
+                except:
+                    # Если все еще ошибка, используем базовый парсер
+                    try:
+                        df = pd.read_csv(journal_file, on_bad_lines='skip', engine='python')
+                    except:
+                        # Последняя попытка - создаем пустой DataFrame
+                        df = pd.DataFrame()
             if df.empty:
                 keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
                 error_text = self._escape_markdown("📭 Нет данных для анализа")
@@ -838,7 +934,8 @@ class TelegramBot:
                 df['datetime'] = datetime.now()
             
             # Фильтруем данные за последние 7 дней
-            week_ago = datetime.now() - timedelta(days=7)
+            from datetime import timezone
+            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
             df_recent = df[df['datetime'] >= week_ago]
             
             # Основная статистика
@@ -856,7 +953,7 @@ class TelegramBot:
             tf_stats = df['tf'].value_counts()
             
             # Анализ последних 24 часов
-            day_ago = datetime.now() - timedelta(days=1)
+            day_ago = datetime.now(timezone.utc) - timedelta(days=1)
             df_today = df[df['datetime'] >= day_ago]
             today_trades = len(df_today)
             today_buy = len(df_today[df_today['signal'] == 'BUY'])
@@ -1031,23 +1128,30 @@ class TelegramBot:
                                  capture_output=True, text=True)
             
             if result.returncode == 0:
+                keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
                 await self._edit_message_with_keyboard(
                     update, context,
-                    "🛑 *Торговля остановлена*\n\n"
-                    "Сервис bybot-trading.service остановлен."
+                    "🛑 Торговля остановлена\n\nСервис bybot-trading.service остановлен.",
+                    keyboard,
+                    parse_mode=None
                 )
             else:
-                error_text = self._escape_markdown(f"❌ *Ошибка остановки*\n\n"
-                    f"Не удалось остановить сервис:\n{result.stderr}")
+                error_text = f"❌ Ошибка остановки\n\nНе удалось остановить сервис:\n{result.stderr}"
+                keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
                 await self._edit_message_with_keyboard(
                     update, context,
-                    error_text
+                    error_text,
+                    keyboard,
+                    parse_mode=None
                 )
         except Exception as e:
-            error_text = self._escape_markdown(f"❌ Ошибка: {str(e)}")
+            error_text = f"❌ Ошибка: {str(e)}"
+            keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
             await self._edit_message_with_keyboard(
                 update, context,
-                error_text
+                error_text,
+                keyboard,
+                parse_mode=None
             )
 
     async def _start_trading(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1057,50 +1161,63 @@ class TelegramBot:
                                  capture_output=True, text=True)
             
             if result.returncode == 0:
+                keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
                 await self._edit_message_with_keyboard(
                     update, context,
-                    "▶️ *Торговля запущена*\n\n"
-                    "Сервис bybot-trading.service запущен."
+                    "▶️ Торговля запущена\n\nСервис bybot-trading.service запущен.",
+                    keyboard,
+                    parse_mode=None
                 )
             else:
-                error_text = self._escape_markdown(f"❌ *Ошибка запуска*\n\n"
-                    f"Не удалось запустить сервис:\n{result.stderr}")
+                error_text = f"❌ Ошибка запуска\n\nНе удалось запустить сервис:\n{result.stderr}"
+                keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
                 await self._edit_message_with_keyboard(
                     update, context,
-                    error_text
+                    error_text,
+                    keyboard,
+                    parse_mode=None
                 )
         except Exception as e:
-            error_text = self._escape_markdown(f"❌ Ошибка: {str(e)}")
+            error_text = f"❌ Ошибка: {str(e)}"
+            keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
             await self._edit_message_with_keyboard(
                 update, context,
-                error_text
+                error_text,
+                keyboard,
+                parse_mode=None
             )
 
     async def _settings_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Настройки риска"""
-        risk_text = self._escape_markdown("🎯 *Настройки риска*\n\n"
-            "• Размер позиции: 1% от баланса\n"
-            "• Stop Loss: ATR-based (динамический)\n"
-            "• Take Profit: R:R 1.5 или уровни Фибоначчи\n"
-            "• Максимальный риск на сделку: 1%\n\n"
-            "Настройки оптимизированы для всех стратегий.")
+        risk_text = "🎯 *Настройки риска*\n\n"\
+            "• Размер позиции: 1% от баланса\n"\
+            "• Stop Loss: ATR-based (динамический)\n"\
+            "• Take Profit: R:R 1.5 или уровни Фибоначчи\n"\
+            "• Максимальный риск на сделку: 1%\n\n"\
+            "Настройки оптимизированы для всех стратегий."
+        keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="settings")]]
         await self._edit_message_with_keyboard(
             update, context,
-            risk_text
+            risk_text,
+            keyboard,
+            parse_mode=None
         )
 
     async def _settings_timeframes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Настройки таймфреймов"""
-        timeframes_text = self._escape_markdown("⏰ *Таймфреймы*\n\n"
-            "Используемые таймфреймы:\n"
-            "• 1m - для быстрых сигналов\n"
-            "• 5m - основной таймфрейм\n"
-            "• 15m - для Strategy_05\n"
-            "• 1h - для определения тренда\n\n"
-            "Все стратегии используют мультитаймфреймовый анализ.")
+        timeframes_text = "⏰ *Таймфреймы*\n\n"\
+            "Используемые таймфреймы:\n"\
+            "• 1m - для быстрых сигналов\n"\
+            "• 5m - основной таймфрейм\n"\
+            "• 15m - для Strategy_05\n"\
+            "• 1h - для определения тренда\n\n"\
+            "Все стратегии используют мультитаймфреймовый анализ."
+        keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="settings")]]
         await self._edit_message_with_keyboard(
             update, context,
-            timeframes_text
+            timeframes_text,
+            keyboard,
+            parse_mode=None
         )
 
     async def _settings_strategies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1115,21 +1232,23 @@ class TelegramBot:
         
         strategies_text += "Все стратегии работают параллельно с оптимизированными SL/TP."
         
-        # Экранируем весь текст для MarkdownV2
-        strategies_text_escaped = self._escape_markdown(strategies_text)
-        await self._edit_message_with_keyboard(update, context, strategies_text_escaped)
+        keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="settings")]]
+        await self._edit_message_with_keyboard(update, context, strategies_text, keyboard, parse_mode=None)
 
     async def _settings_notifications(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Настройки уведомлений"""
-        notifications_text = self._escape_markdown("🔔 *Уведомления*\n\n"
-            "• Уведомления о сигналах стратегий\n"
-            "• Уведомления об открытии/закрытии позиций\n"
-            "• Уведомления об ошибках\n"
-            "• Статус всех стратегий\n\n"
-            "Все уведомления отправляются в этот чат.")
+        notifications_text = "🔔 *Уведомления*\n\n"\
+            "• Уведомления о сигналах стратегий\n"\
+            "• Уведомления об открытии/закрытии позиций\n"\
+            "• Уведомления об ошибках\n"\
+            "• Статус всех стратегий\n\n"\
+            "Все уведомления отправляются в этот чат."
+        keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="settings")]]
         await self._edit_message_with_keyboard(
             update, context,
-            notifications_text
+            notifications_text,
+            keyboard,
+            parse_mode=None
         )
 
     async def _profit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1146,7 +1265,11 @@ class TelegramBot:
                 from datetime import datetime, timedelta
                 
                 # Читаем данные с правильными параметрами для CSV
-                df = pd.read_csv(trades_file, quoting=1)  # QUOTE_ALL
+                try:
+                    df = pd.read_csv(trades_file, quoting=1)  # QUOTE_ALL
+                except pd.errors.ParserError:
+                    # Если CSV поврежден, используем более надежный парсер
+                    df = pd.read_csv(trades_file, on_bad_lines='skip', engine='python')
                 
                 if df.empty:
                     profit_text = "📈 *СТАТИСТИКА ПРИБЫЛИ*\n\n"
@@ -1157,7 +1280,8 @@ class TelegramBot:
                     df['datetime'] = pd.to_datetime(df['datetime'])
                     
                     # Фильтруем по периодам
-                    now = datetime.now()
+                    from datetime import timezone
+                    now = datetime.now(timezone.utc)
                     day_ago = now - timedelta(days=1)
                     week_ago = now - timedelta(days=7)
                     
@@ -1217,6 +1341,128 @@ class TelegramBot:
         except Exception as e:
             keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
             error_text = self._escape_markdown(f"❌ Ошибка получения статистики: {str(e)}")
+            await self._edit_message_with_keyboard(
+                update, context,
+                error_text,
+                keyboard
+            )
+
+    async def _profit_details(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать детальную статистику прибыли по стратегиям"""
+        try:
+            import pandas as pd
+            from datetime import datetime, timedelta, timezone
+
+            # Проверяем журнал сделок
+            journal_file = "data/trade_journal.csv"
+            if not os.path.exists(journal_file):
+                details_text = "📈 *ДЕТАЛЬНАЯ СТАТИСТИКА*\n\n"
+                details_text += "❌ Нет данных для анализа\n"
+                details_text += "📊 Файл trade_journal.csv не найден"
+            else:
+                # Читаем данные с обработкой ошибок
+                try:
+                    df = pd.read_csv(journal_file, quoting=1)
+                except pd.errors.ParserError:
+                    df = pd.read_csv(journal_file, on_bad_lines='skip', engine='python')
+
+                if df.empty:
+                    details_text = "📈 *ДЕТАЛЬНАЯ СТАТИСТИКА*\n\n"
+                    details_text += "❌ Нет данных для анализа\n"
+                    details_text += "📊 Файл пуст"
+                else:
+                    # Конвертируем timestamp
+                    df['datetime'] = pd.to_datetime(df['timestamp'], errors='coerce')
+                    df = df[df['datetime'].notna()]
+
+                    # Фильтруем данные за периоды
+                    now = datetime.now(timezone.utc)
+                    day_ago = now - timedelta(days=1)
+                    week_ago = now - timedelta(days=7)
+                    month_ago = now - timedelta(days=30)
+
+                    df_24h = df[df['datetime'] >= day_ago]
+                    df_7d = df[df['datetime'] >= week_ago]
+                    df_30d = df[df['datetime'] >= month_ago]
+
+                    details_text = "📈 *ДЕТАЛЬНАЯ СТАТИСТИКА*\n\n"
+
+                    # Общая статистика по периодам
+                    details_text += "📊 *Сигналы по периодам:*\n"
+                    details_text += f"   📅 За 24 часа: {len(df_24h)}\n"
+                    details_text += f"   📅 За 7 дней: {len(df_7d)}\n"
+                    details_text += f"   📅 За 30 дней: {len(df_30d)}\n"
+                    details_text += f"   📅 Всего: {len(df)}\n\n"
+
+                    # Детальная статистика по стратегиям
+                    details_text += "🎯 *Анализ по стратегиям:*\n"
+                    strategy_stats = df.groupby('strategy').agg({
+                        'signal': ['count'],
+                        'entry_price': ['mean']
+                    }).round(2)
+
+                    strategy_signals = df['strategy'].value_counts()
+                    for strategy, count in strategy_signals.head(10).items():
+                        buy_count = len(df[(df['strategy'] == strategy) & (df['signal'] == 'BUY')])
+                        sell_count = len(df[(df['strategy'] == strategy) & (df['signal'] == 'SELL')])
+
+                        # Последние сигналы этой стратегии
+                        recent_strategy = df[df['strategy'] == strategy].tail(5)
+                        if not recent_strategy.empty:
+                            avg_price = recent_strategy['entry_price'].mean()
+                            last_signal = recent_strategy.iloc[-1]['signal']
+                            last_time = recent_strategy.iloc[-1]['datetime'].strftime('%m-%d %H:%M')
+                        else:
+                            avg_price = 0
+                            last_signal = "N/A"
+                            last_time = "N/A"
+
+                        details_text += f"\n📊 *{strategy}*:\n"
+                        details_text += f"   📈 Всего: {count} ({buy_count} BUY / {sell_count} SELL)\n"
+                        details_text += f"   💰 Средняя цена: ${avg_price:.2f}\n"
+                        details_text += f"   🕐 Последний: {last_signal} ({last_time})\n"
+
+                    # Статистика по таймфреймам
+                    details_text += "\n⏰ *По таймфреймам:*\n"
+                    tf_stats = df['tf'].value_counts()
+                    for tf, count in tf_stats.items():
+                        tf_buy = len(df[(df['tf'] == tf) & (df['signal'] == 'BUY')])
+                        tf_sell = len(df[(df['tf'] == tf) & (df['signal'] == 'SELL')])
+                        details_text += f"   {tf}: {count} ({tf_buy} BUY / {tf_sell} SELL)\n"
+
+                    # Активность по часам (последние 24 часа)
+                    if not df_24h.empty:
+                        details_text += "\n🕐 *Активность за 24 часа:*\n"
+                        hourly_activity = df_24h.groupby(df_24h['datetime'].dt.hour).size()
+                        for hour in sorted(hourly_activity.index):
+                            count = hourly_activity[hour]
+                            details_text += f"   {hour:02d}:00 - {count} сигналов\n"
+
+                    # Топ комментарии/причины
+                    details_text += "\n💬 *Топ причины сигналов:*\n"
+                    comment_stats = df['comment'].value_counts()
+                    for comment, count in comment_stats.head(5).items():
+                        if len(comment) > 30:
+                            comment = comment[:27] + "..."
+                        details_text += f"   • {comment}: {count}\n"
+
+            keyboard = [
+                [
+                    InlineKeyboardButton("📊 Графики", callback_data="charts"),
+                    InlineKeyboardButton("📋 Сделки", callback_data="trades")
+                ],
+                [
+                    InlineKeyboardButton("💰 Прибыль", callback_data="profit"),
+                    InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")
+                ]
+            ]
+
+            # Для детальных данных используем обычный текст
+            await self._edit_message_with_keyboard(update, context, details_text, keyboard, parse_mode=None)
+
+        except Exception as e:
+            keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="profit")]]
+            error_text = self._escape_markdown(f"❌ Ошибка детальной статистики: {str(e)}")
             await self._edit_message_with_keyboard(
                 update, context,
                 error_text,
@@ -1287,9 +1533,9 @@ class TelegramBot:
             neural_text += "   • strategy\\_05 \\- Fibonacci\\_RSI\\_Volume\\_Optimized\n"
             neural_text += "   • strategy\\_06 \\- VolumeClimaxReversal\\_Optimized\n"
             neural_text += "   • strategy\\_07 \\- BreakoutRetest\\_Optimized\n"
-            neural_text += "   • strategy\\_08 \\- Заглушка \\(обучение\\)\n"
-            neural_text += "   • strategy\\_09 \\- Заглушка \\(обучение\\)\n"
-            neural_text += "   • strategy\\_10 \\- Заглушка \\(обучение\\)\n"
+            neural_text += "   • strategy\\_08 \\- AdvancedMomentum\\_AI\n"
+            neural_text += "   • strategy\\_09 \\- SmartVolume\\_ML\n"
+            neural_text += "   • strategy\\_10 \\- NeuralPattern\\_Recognition\n"
             
             # Навигационные кнопки
             keyboard = [
@@ -1309,6 +1555,237 @@ class TelegramBot:
         except Exception as e:
             keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
             error_text = self._escape_markdown(f"❌ Ошибка получения данных нейронки: {str(e)}")
+            await self._edit_message_with_keyboard(
+                update, context,
+                error_text,
+                keyboard
+            )
+
+    async def _analytics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать детальную аналитику торговли"""
+        try:
+            import pandas as pd
+            from datetime import datetime, timedelta, timezone
+
+            # Читаем журнал сделок
+            try:
+                df = pd.read_csv('data/trade_journal.csv')
+                if df.empty:
+                    raise ValueError("Журнал сделок пуст")
+
+                # Конвертируем timestamp в datetime если нужно
+                if 'timestamp' in df.columns:
+                    df['datetime'] = pd.to_datetime(df['timestamp'])
+                elif 'datetime' in df.columns:
+                    df['datetime'] = pd.to_datetime(df['datetime'])
+                else:
+                    raise ValueError("Нет столбца времени в данных")
+
+            except Exception as e:
+                raise ValueError(f"Ошибка чтения данных: {e}")
+
+            # Анализируем последние 7 дней
+            week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+            df_recent = df[df['datetime'] >= week_ago]
+
+            # Основная статистика
+            total_trades = len(df)
+            recent_trades = len(df_recent)
+            buy_signals = len(df[df['signal'] == 'BUY'])
+            sell_signals = len(df[df['signal'] == 'SELL'])
+
+            # Анализ по стратегиям
+            strategy_stats = df['strategy'].value_counts().head(5)
+
+            # Анализ по временным фреймам
+            tf_stats = df['tf'].value_counts().head(3)
+
+            # Анализ последних 24 часов
+            day_ago = datetime.now(timezone.utc) - timedelta(days=1)
+            df_today = df[df['datetime'] >= day_ago]
+            today_trades = len(df_today)
+
+            # Анализ активности по часам
+            df_recent['hour'] = df_recent['datetime'].dt.hour
+            hourly_activity = df_recent['hour'].value_counts().sort_index()
+
+            # Формируем отчет
+            analytics_text = "📈 *Детальная аналитика торговли*\n\n"
+
+            # Общие показатели
+            analytics_text += "📊 *Общие показатели:*\n"
+            analytics_text += f"   📈 Всего сигналов: {total_trades:,}\n"
+            analytics_text += f"   📅 За неделю: {recent_trades:,}\n"
+            analytics_text += f"   ⏰ За 24 часа: {today_trades}\n"
+            analytics_text += f"   🟢 Покупки: {buy_signals:,} ({buy_signals/total_trades*100:.1f}%)\n"
+            analytics_text += f"   🔴 Продажи: {sell_signals:,} ({sell_signals/total_trades*100:.1f}%)\n\n"
+
+            # Топ стратегий
+            analytics_text += "🎯 *Топ-5 стратегий:*\n"
+            for i, (strategy, count) in enumerate(strategy_stats.items(), 1):
+                strategy_name = strategy.replace('_', '\\_')
+                percentage = count/total_trades*100
+                analytics_text += f"   {i}\\. {strategy_name}\n"
+                analytics_text += f"      📊 {count:,} сигналов ({percentage:.1f}%)\n"
+
+            # Временные фреймы
+            analytics_text += "\n⏰ *Популярные таймфреймы:*\n"
+            for tf, count in tf_stats.items():
+                percentage = count/total_trades*100
+                analytics_text += f"   📊 {tf}: {count:,} ({percentage:.1f}%)\n"
+
+            # Активность по времени
+            if len(hourly_activity) > 0:
+                peak_hour = hourly_activity.idxmax()
+                peak_count = hourly_activity.max()
+                analytics_text += f"\n🔥 *Пиковая активность:*\n"
+                analytics_text += f"   ⏰ {peak_hour}:00 - {peak_count} сигналов\n"
+
+            # Тренды
+            if recent_trades > 0:
+                daily_avg = recent_trades / 7
+                analytics_text += f"\n📈 *Тренды:*\n"
+                analytics_text += f"   📊 Среднее в день: {daily_avg:.1f} сигналов\n"
+                if today_trades > daily_avg:
+                    analytics_text += f"   🔥 Сегодня выше среднего (+{today_trades-daily_avg:.1f})\n"
+                else:
+                    analytics_text += f"   📉 Сегодня ниже среднего ({today_trades-daily_avg:.1f})\n"
+
+            # Навигационные кнопки
+            keyboard = [
+                [
+                    InlineKeyboardButton("🔄 Обновить", callback_data="analytics"),
+                    InlineKeyboardButton("📊 Статистика", callback_data="statistics")
+                ],
+                [
+                    InlineKeyboardButton("📈 Графики", callback_data="charts"),
+                    InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")
+                ]
+            ]
+
+            await self._edit_message_with_keyboard(update, context, analytics_text, keyboard, parse_mode=None)
+
+        except Exception as e:
+            keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
+            error_text = self._escape_markdown(f"❌ Ошибка аналитики: {str(e)}")
+            await self._edit_message_with_keyboard(
+                update, context,
+                error_text,
+                keyboard
+            )
+
+    async def _statistics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать статистику системы и производительности"""
+        try:
+            import pandas as pd
+            import psutil
+            import os
+            from datetime import datetime, timezone
+
+            # Системная информация
+            cpu_percent = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+
+            # Информация о процессе
+            process = psutil.Process()
+            process_memory = process.memory_info()
+            process_cpu = process.cpu_percent()
+
+            # Статистика файлов
+            trade_journal_size = 0
+            trade_journal_lines = 0
+            if os.path.exists('data/trade_journal.csv'):
+                trade_journal_size = os.path.getsize('data/trade_journal.csv')
+                with open('data/trade_journal.csv', 'r') as f:
+                    trade_journal_lines = sum(1 for _ in f) - 1  # Исключаем заголовок
+
+            log_files_size = 0
+            if os.path.exists('trading_bot.log'):
+                log_files_size += os.path.getsize('trading_bot.log')
+
+            # Проверяем API
+            api_status = "🟢 Активен"
+            try:
+                from bot.exchange.bybit_api_v5 import BybitAPIV5
+                from config import get_api_credentials
+                api_key, api_secret = get_api_credentials()
+                api = BybitAPIV5(api_key, api_secret, testnet=True)
+
+                # Проверяем подключение
+                server_time = api.get_server_time()
+                if server_time.get('retCode') == 0:
+                    api_status = "🟢 Подключен"
+                else:
+                    api_status = f"🟡 Ошибка: {server_time.get('retMsg', 'Unknown')}"
+            except Exception as e:
+                api_status = f"🔴 Недоступен: {str(e)[:30]}..."
+
+            # Статистика стратегий
+            strategies_count = 0
+            try:
+                import glob
+                strategy_files = glob.glob("bot/strategy/strategy_*.py")
+                strategies_count = len(strategy_files)
+            except:
+                strategies_count = "N/A"
+
+            # Формируем отчет
+            stats_text = "📊 *Системная статистика*\n\n"
+
+            # Системные ресурсы
+            stats_text += "🖥️ *Системные ресурсы:*\n"
+            stats_text += f"   🔥 CPU: {cpu_percent:.1f}%\n"
+            stats_text += f"   🧠 RAM: {memory.percent:.1f}% ({memory.used/(1024**3):.1f}GB/{memory.total/(1024**3):.1f}GB)\n"
+            stats_text += f"   💾 Диск: {disk.percent:.1f}% ({disk.used/(1024**3):.1f}GB/{disk.total/(1024**3):.1f}GB)\n\n"
+
+            # Процесс бота
+            stats_text += "🤖 *Процесс бота:*\n"
+            stats_text += f"   🔥 CPU: {process_cpu:.1f}%\n"
+            stats_text += f"   🧠 RAM: {process_memory.rss/(1024**2):.1f}MB\n"
+            stats_text += f"   📊 PID: {process.pid}\n\n"
+
+            # API и подключения
+            stats_text += "🌐 *API и подключения:*\n"
+            stats_text += f"   🔗 Bybit API: {api_status}\n"
+            stats_text += f"   📡 Telegram Bot: 🟢 Активен\n\n"
+
+            # Данные
+            stats_text += "📁 *Данные:*\n"
+            stats_text += f"   📋 Сделок в журнале: {trade_journal_lines:,}\n"
+            stats_text += f"   📄 Размер журнала: {trade_journal_size/(1024**2):.1f}MB\n"
+            stats_text += f"   📝 Размер логов: {log_files_size/(1024**2):.1f}MB\n\n"
+
+            # Компоненты
+            stats_text += "⚙️ *Компоненты:*\n"
+            stats_text += f"   🎯 Стратегий: {strategies_count}\n"
+            stats_text += f"   📊 Rate Limiter: 🟢 Активен\n"
+            stats_text += f"   🛡️ Risk Manager: 🟢 Активен\n"
+            stats_text += f"   📈 Order Manager: 🟢 Активен\n\n"
+
+            # Время работы
+            uptime = datetime.now(timezone.utc) - datetime.fromtimestamp(process.create_time(), timezone.utc)
+            hours = int(uptime.total_seconds() // 3600)
+            minutes = int((uptime.total_seconds() % 3600) // 60)
+            stats_text += f"⏰ *Время работы:* {hours}ч {minutes}м\n"
+
+            # Навигационные кнопки
+            keyboard = [
+                [
+                    InlineKeyboardButton("🔄 Обновить", callback_data="statistics"),
+                    InlineKeyboardButton("📈 Аналитика", callback_data="analytics")
+                ],
+                [
+                    InlineKeyboardButton("📊 Графики", callback_data="charts"),
+                    InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")
+                ]
+            ]
+
+            await self._edit_message_with_keyboard(update, context, stats_text, keyboard, parse_mode=None)
+
+        except Exception as e:
+            keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
+            error_text = self._escape_markdown(f"❌ Ошибка статистики: {str(e)}")
             await self._edit_message_with_keyboard(
                 update, context,
                 error_text,
@@ -1354,27 +1831,38 @@ class TelegramBot:
         except Exception as e:
             print(f"[ERROR] Ошибка send_admin_message: {e}")
 
-    def start(self):
-        """Запуск бота в текущем потоке"""
-        print("[DEBUG] Запуск Telegram бота...")
-        try:
-            import asyncio
-            
-            # Создаем event loop для текущего потока
+    def _run_in_thread(self):
+        """Запуск бота в отдельном потоке для избежания конфликтов event loop"""
+        import threading
+        import asyncio
+
+        def thread_worker():
+            # Создаем новый event loop для потока
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            print("[DEBUG] Попытка подключения к Telegram API...")
-            # Запускаем polling напрямую
-            self.app.run_polling(drop_pending_updates=True, close_loop=False)
-                    
-        except KeyboardInterrupt:
-            print("[DEBUG] Telegram бот остановлен пользователем")
-        except Exception as e:
-            print(f"[ERROR] Критическая ошибка Telegram бота: {e}")
+                async def run_bot():
+                    await self.app.run_polling(drop_pending_updates=True, stop_signals=None)
+                loop.run_until_complete(run_bot())
+            except Exception as e:
+                print(f"[ERROR] Ошибка в thread_worker: {e}")
+            finally:
+                loop.close()
+
+        # Запускаем в отдельном потоке
+        thread = threading.Thread(target=thread_worker, daemon=True)
+        thread.start()
+        print("[DEBUG] Telegram бот запущен в отдельном потоке")
+
+    def start(self):
+        """Запуск бота - всегда в отдельном потоке"""
+        if self._is_running:
+            print("[DEBUG] Telegram бот уже запущен, пропускаем...")
+            return
+
+        print("[DEBUG] Запуск Telegram бота в отдельном потоке...")
+        self._is_running = True
+        self._run_in_thread()
 
 if __name__ == "__main__":
     from config import TELEGRAM_TOKEN

@@ -20,6 +20,7 @@ from bot.core.exceptions import (
     RiskLimitExceededError, ThreadSafetyViolationError
 )
 from bot.core.secure_logger import get_secure_logger
+from bot.core.emergency_stop import global_emergency_stop
 
 
 class ErrorSeverity(Enum):

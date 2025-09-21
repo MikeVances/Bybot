@@ -13,8 +13,6 @@ import csv
 
 from pybit.unified_trading import HTTP
 from config import BYBIT_API_KEY, BYBIT_API_SECRET, BYBIT_API_URL
-from bot.core.rate_limiter import get_rate_limiter
-from bot.core.secure_logger import get_secure_logger
 
 
 class BybitAPIV5:
@@ -41,27 +39,75 @@ class BybitAPIV5:
         self.api_key = api_key or BYBIT_API_KEY
         self.api_secret = api_secret or BYBIT_API_SECRET
         
-        # Определяем URL в зависимости от testnet
-        if testnet:
-            self.base_url = "https://api-testnet.bybit.com"
-        else:
-            self.base_url = BYBIT_API_URL or "https://api.bybit.com"
-        
+        # Используем централизованную конфигурацию API
+        from config import get_api_config
+        api_config = get_api_config()
+        self.base_url = api_config['base_url']
+
+        # Используем централизованную настройку testnet
+        self.testnet = api_config['testnet']
+
         # Создаем сессию с официальной библиотекой
-        self.session = HTTP(
-            api_key=self.api_key,
-            api_secret=self.api_secret,
-            testnet=testnet
-        )
+        # Отключаем системный прокси для стабильного соединения с Bybit API
+        import os
+        original_proxies = {}
+        for proxy_key in ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']:
+            if proxy_key in os.environ:
+                original_proxies[proxy_key] = os.environ.pop(proxy_key)
+
+        try:
+            self.session = HTTP(
+                api_key=self.api_key,
+                api_secret=self.api_secret,
+                testnet=self.testnet  # Используем централизованную настройку
+            )
+        finally:
+            # Восстанавливаем прокси настройки
+            for key, value in original_proxies.items():
+                os.environ[key] = value
+
+        # Для testnet сервера устанавливаем правильный endpoint
+        if self.testnet:
+            self.session.endpoint = self.base_url
+            # Обязательно устанавливаем правильный базовый URL для demo сервера
+            self.session.BASE_URL = self.base_url
         
-        # Настройка защищённого логирования
-        self.logger = get_secure_logger('bybit_api_v5')
+        # Настройка защищённого логирования (ленивая инициализация)
+        self._logger = None
         
-        # Инициализация rate limiter
-        self.rate_limiter = get_rate_limiter()
+        # Rate limiter будет инициализирован при первом использовании
+        self._rate_limiter = None
         
-        self.logger.info(f"🚀 Bybit API v5 инициализирован (testnet: {testnet})")
-    
+        # Логируем инициализацию через стандартный logger
+        import logging
+        logging.getLogger('bybit_api_v5').info(f"🚀 Bybit API v5 инициализирован (testnet: {self.testnet}, URL: {self.base_url})")
+
+    @property
+    def logger(self):
+        """Ленивая инициализация logger для избежания циркулярного импорта"""
+        if self._logger is None:
+            try:
+                from bot.core.secure_logger import get_secure_logger
+                self._logger = get_secure_logger('bybit_api_v5')
+            except ImportError:
+                import logging
+                self._logger = logging.getLogger('bybit_api_v5')
+        return self._logger
+
+    @property
+    def rate_limiter(self):
+        """Ленивая инициализация rate_limiter для избежания циркулярного импорта"""
+        if self._rate_limiter is None:
+            try:
+                from bot.core.rate_limiter import get_rate_limiter
+                self._rate_limiter = get_rate_limiter()
+            except ImportError:
+                # Fallback: создаем заглушку если rate_limiter недоступен
+                class MockRateLimiter:
+                    def can_make_request(self, endpoint): return True
+                self._rate_limiter = MockRateLimiter()
+        return self._rate_limiter
+
     def get_wallet_balance_v5(self) -> Dict[str, Any]:
         """
         Получение баланса кошелька (v5 API)
@@ -99,13 +145,26 @@ class BybitAPIV5:
             return "Ошибка получения баланса"
         
         try:
+            # Безопасная конвертация значений
+            def safe_float_format(value, decimals=4):
+                try:
+                    if value == '' or value is None:
+                        return "0.0000"
+                    return f"{float(value):.{decimals}f}"
+                except (ValueError, TypeError):
+                    return "0.0000"
+
             result = balance_data['result']['list'][0]
             coins = "\n".join(
-                f"{coin['coin']}: {coin['walletBalance']} (${coin['usdValue']})"
-                for coin in result['coin']
+                f"{coin['coin']}: {safe_float_format(coin.get('walletBalance', 0))} (${safe_float_format(coin.get('usdValue', 0), 2)})"
+                for coin in result.get('coin', [])
             )
-            return f"""Общий баланс: ${result['totalEquity']}
-Доступно: ${result['totalAvailableBalance']}
+
+            total_equity = safe_float_format(result.get('totalEquity', 0), 2)
+            total_available = safe_float_format(result.get('totalAvailableBalance', 0), 2)
+
+            return f"""Общий баланс: ${total_equity}
+Доступно: ${total_available}
 Монеты:
 {coins}"""
         except Exception as e:
@@ -151,11 +210,8 @@ class BybitAPIV5:
             if order_type == "Limit" and price:
                 params["price"] = str(price)
             
-            # Добавляем стопы
-            if stop_loss:
-                params["stopLoss"] = str(stop_loss)
-            if take_profit:
-                params["takeProfit"] = str(take_profit)
+            # Стопы устанавливаются отдельно через set_trading_stop()
+            # Для рыночных ордеров stopLoss и takeProfit в create_order не поддерживаются
             
             # Добавляем reduce_only
             if reduce_only:
@@ -313,8 +369,8 @@ class BybitAPIV5:
                 for col in ['open', 'high', 'low', 'close', 'volume', 'turnover']:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                 
-                # Конвертируем timestamp
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                # Конвертируем timestamp (исправляем FutureWarning)
+                df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
                 
                 # Сортируем по времени
                 df = df.sort_values('timestamp').reset_index(drop=True)

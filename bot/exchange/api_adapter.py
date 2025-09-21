@@ -131,6 +131,25 @@ class TradingBotAdapter:
         """Получение OHLCV данных"""
         return self.bot.get_ohlcv(self.symbol, interval, limit)
 
+    def get_wallet_balance_v5(self) -> Dict[str, Any]:
+        """Получение баланса кошелька"""
+        return self.bot.get_wallet_balance_v5()
+
+    def format_balance_v5(self, balance_data: Dict[str, Any]) -> str:
+        """Форматирование баланса"""
+        return self.bot.format_balance_v5(balance_data)
+
+    def get_positions(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Получение позиций"""
+        return self.bot.get_positions(symbol or self.symbol)
+
+    def log_strategy_signal(self, strategy: str, symbol: str, signal: str,
+                           market_data: Dict[str, Any], indicators: Dict[str, Any],
+                           comment: str = "") -> None:
+        """Логирование сигнала стратегии"""
+        return self.bot.log_strategy_signal(strategy, symbol, signal,
+                                         market_data, indicators, comment)
+
 
 # Фабричные функции для создания адаптеров
 def create_api_adapter(api_key: str = None, api_secret: str = None, 

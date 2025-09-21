@@ -2,7 +2,7 @@
 # Основной торговый цикл с интегрированным риск-менеджментом и нейронной сетью
 # Функции: выполнение стратегий, контроль рисков, управление позициями, мониторинг
 
-import time
+import time as time_module
 import csv
 import logging
 from datetime import datetime, timezone
@@ -15,7 +15,7 @@ from typing import Optional, Dict, Any
 from bot.exchange.api_adapter import create_trading_bot_adapter
 from bot.ai import NeuralIntegration
 from bot.risk import RiskManager
-from config import get_strategy_config
+from config import get_strategy_config, USE_V5_API, USE_TESTNET, SYMBOL
 
 # 🛡️ КРИТИЧЕСКИЕ ИМПОРТЫ БЕЗОПАСНОСТИ
 from bot.core.order_manager import get_order_manager, OrderRequest
@@ -23,6 +23,8 @@ from bot.core.thread_safe_state import get_bot_state
 from bot.core.rate_limiter import get_rate_limiter
 from bot.core.secure_logger import get_secure_logger
 from bot.core.error_handler import get_error_handler, handle_trading_error, ErrorContext, RecoveryStrategy
+from bot.core.emergency_stop import global_emergency_stop
+from bot.core.global_circuit_breaker import global_circuit_breaker
 from bot.core.exceptions import OrderRejectionError, RateLimitError, EmergencyStopError
 
 # Импорты основных компонентов бота
@@ -332,8 +334,10 @@ def update_position_in_risk_manager(risk_manager: RiskManager, strategy_name: st
     except Exception as e:
         logging.error(f"❌ Ошибка обновления позиции в риск-менеджере: {e}")
 
-def sync_position_with_exchange(api, state: BotState, symbol: str = "BTCUSDT"):
+def sync_position_with_exchange(api, state: BotState, symbol: str = None):
     """Синхронизация состояния позиции с биржей"""
+    if symbol is None:
+        symbol = SYMBOL
     try:
         positions = api.get_positions(symbol)
         if positions and positions.get('retCode') == 0:
@@ -394,6 +398,33 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
         
         strategy_names = get_active_strategies()
         main_logger.info(f"📋 Найдено {len(strategy_names)} активных стратегий")
+
+        # 🚨 ИНИЦИАЛИЗАЦИЯ EMERGENCY STOP СИСТЕМЫ
+        main_logger.info("🚨 Инициализация системы экстренной остановки...")
+
+        # Создаем API клиенты сначала для emergency stop
+        temp_apis = {}
+        for strategy_name in strategy_names:
+            try:
+                config = get_strategy_config(strategy_name)
+                temp_apis[strategy_name] = create_trading_bot_adapter(
+                    symbol=SYMBOL,
+                    api_key=config['api_key'],
+                    api_secret=config['api_secret'],
+                    uid=config.get('uid'),
+                    testnet=USE_TESTNET
+                )
+                main_logger.info(f"✅ API для {strategy_name} создан для emergency stop")
+            except Exception as e:
+                main_logger.error(f"❌ Ошибка создания API для {strategy_name}: {e}")
+
+        # Запускаем мониторинг emergency stop
+        global_emergency_stop.start_monitoring(temp_apis)
+        main_logger.info("🚨 Система экстренной остановки запущена")
+
+        # 🔌 ЗАПУСК CIRCUIT BREAKER
+        global_circuit_breaker.start_monitoring()
+        main_logger.info("🔌 Circuit Breaker запущен")
         
         # Инициализация стратегий
         for strategy_name in strategy_names:
@@ -406,12 +437,11 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                     continue
                 
                 strategy_apis[strategy_name] = create_trading_bot_adapter(
-                    symbol="BTCUSDT",
+                    symbol=SYMBOL,
                     api_key=config['api_key'],
                     api_secret=config['api_secret'],
                     uid=config.get('uid'),
-                    use_v5=USE_V5_API,  # Используем конфигурацию
-                    testnet=USE_TESTNET   # Используем конфигурацию
+                    testnet=USE_TESTNET
                 )
                 strategy_states[strategy_name] = BotState()
                 strategy_loggers[strategy_name] = setup_strategy_logger(strategy_name)
@@ -524,7 +554,7 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                     # Обновляем риск-менеджер
                     current_balance = get_current_balance(strategy_apis[strategy_name])
                     update_position_in_risk_manager(
-                        risk_manager, strategy_name, "BTCUSDT", current_price, current_balance
+                        risk_manager, strategy_name, SYMBOL, current_price, current_balance
                     )
 
                 # Собираем сигналы от всех стратегий
@@ -568,6 +598,21 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                         logger.error(f"❌ Ошибка выполнения стратегии {strategy_name}: {e}")
                 
                 main_logger.info(f"📈 Получено {len(strategy_signals)} сигналов")
+
+                # 🚨 ПРОВЕРКА EMERGENCY STOP ПЕРЕД ОБРАБОТКОЙ СИГНАЛОВ
+                trading_allowed, stop_reason = global_emergency_stop.is_trading_allowed()
+                if not trading_allowed:
+                    main_logger.critical(f"🚨 ТОРГОВЛЯ ЗАБЛОКИРОВАНА: {stop_reason}")
+                    # Пропускаем обработку сигналов
+                    time_module.sleep(60)  # Ждем минуту перед следующей проверкой
+                    continue
+
+                # 🔌 ПРОВЕРКА CIRCUIT BREAKER
+                circuit_ok, circuit_reason = global_circuit_breaker.can_execute_request()
+                if not circuit_ok:
+                    main_logger.warning(f"🔌 CIRCUIT BREAKER: {circuit_reason}")
+                    time_module.sleep(30)  # Ждем 30 секунд перед повтором
+                    continue
                 
                 # ВЫПОЛНЕНИЕ ТОРГОВЫХ ОПЕРАЦИЙ С РИСК-МЕНЕДЖМЕНТОМ
                 for strategy_name, signal in strategy_signals.items():
@@ -592,11 +637,24 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                             # Добавляем рыночные данные в сигнал
                             signal['market_data'] = all_market_data
                             
+                            # КРИТИЧЕСКАЯ ПРОВЕРКА БАЛАНСА (добавлено)
+                            from bot.core.balance_validator import validate_trade_balance
+
+                            trade_amount = float(signal.get('amount', 0.001))
+                            balance_ok, balance_reason = validate_trade_balance(
+                                api, trade_amount, SYMBOL, leverage=1.0
+                            )
+
+                            if not balance_ok:
+                                logger.error(f"💰 БЛОКИРОВКА ПО БАЛАНСУ: {balance_reason}")
+                                main_logger.error(f"Стратегия {strategy_name}: {balance_reason}")
+                                continue
+
                             # ПРОВЕРКА РИСКОВ
                             risk_ok, risk_reason = risk_manager.check_pre_trade_risk(
                                 strategy_name, signal, current_balance, api
                             )
-                            
+
                             if not risk_ok:
                                 logger.warning(f"🚫 Сделка отклонена: {risk_reason}")
                                 main_logger.warning(f"Стратегия {strategy_name}: {risk_reason}")
@@ -633,7 +691,7 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                                 order_manager = get_order_manager()
                                 
                                 order_request = OrderRequest(
-                                    symbol="BTCUSDT",
+                                    symbol=SYMBOL,
                                     side=api_side,
                                     order_type=order_type,
                                     qty=trade_amount,
@@ -653,7 +711,7 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                                 # 🛡️ ЦЕНТРАЛИЗОВАННАЯ ОБРАБОТКА ОШИБОК
                                 context = ErrorContext(
                                     strategy_name=strategy_name,
-                                    symbol="BTCUSDT",
+                                    symbol=SYMBOL,
                                     operation="create_order"
                                 )
                                 handle_trading_error(e, context, RecoveryStrategy.SKIP_ITERATION)
@@ -663,7 +721,7 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                                 # 🛡️ БЕЗОПАСНОЕ ОБНОВЛЕНИЕ СОСТОЯНИЯ через ThreadSafeBotState
                                 bot_state = get_bot_state()
                                 bot_state.set_position(
-                                    symbol="BTCUSDT",
+                                    symbol=SYMBOL,
                                     side=api_side,
                                     size=trade_amount,
                                     entry_price=entry_price,
@@ -684,11 +742,11 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                                     try:
                                         # Ждем немного, чтобы позиция точно открылась
                                         import time
-                                        time.sleep(1)
+                                        time_module.sleep(1)
                                         
                                         # Устанавливаем стопы через отдельный API вызов
                                         stop_response = api.set_trading_stop(
-                                            symbol="BTCUSDT",
+                                            symbol=SYMBOL,
                                             stop_loss=stop_loss,
                                             take_profit=take_profit
                                         )
@@ -728,7 +786,7 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                                 
                                 # Логируем сделку
                                 api.log_trade(
-                                    symbol="BTCUSDT",
+                                    symbol=SYMBOL,
                                     side=side,
                                     qty=trade_amount,
                                     entry_price=entry_price,
@@ -767,7 +825,7 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                                 order_manager = get_order_manager()
                                 
                                 close_request = OrderRequest(
-                                    symbol="BTCUSDT",
+                                    symbol=SYMBOL,
                                     side=api_close_side,
                                     order_type="Market",
                                     qty=state.position_size,
@@ -785,7 +843,7 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                                 # 🛡️ ЦЕНТРАЛИЗОВАННАЯ ОБРАБОТКА ОШИБОК 
                                 context = ErrorContext(
                                     strategy_name=strategy_name,
-                                    symbol="BTCUSDT", 
+                                    symbol=SYMBOL, 
                                     operation="close_position"
                                 )
                                 handle_trading_error(e, context, RecoveryStrategy.SKIP_ITERATION)
@@ -803,7 +861,7 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                                 
                                 # Обновляем риск-менеджер
                                 risk_manager.close_position(
-                                    strategy_name, "BTCUSDT", exit_price, realized_pnl
+                                    strategy_name, SYMBOL, exit_price, realized_pnl
                                 )
                                 
                                 logger.info(f"✅ Позиция закрыта, P&L: ${realized_pnl:.2f}")
