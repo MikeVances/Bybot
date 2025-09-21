@@ -578,9 +578,19 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                         
                         # Создаем экземпляр стратегии
                         strategy = strategy_factory()
-                        
-                        # Выполняем стратегию
-                        signal = strategy.execute(all_market_data, state, api)
+
+                        # Проверяем, это стратегия v2.0 или старая
+                        if hasattr(strategy, '__class__') and hasattr(strategy.__class__, '__bases__'):
+                            base_classes = [cls.__name__ for cls in strategy.__class__.__bases__]
+                            if 'BaseStrategy' in base_classes:
+                                # Новая стратегия v2.0 - используем новую сигнатуру
+                                signal = strategy.execute(all_market_data)
+                            else:
+                                # Старая стратегия - используем старую сигнатуру
+                                signal = strategy.execute(all_market_data, state, api)
+                        else:
+                            # Fallback на старую сигнатуру
+                            signal = strategy.execute(all_market_data, state, api)
                         
                         if signal:
                             logger.info(f"📊 Сигнал: {signal.get('signal')} по цене {signal.get('entry_price')}")

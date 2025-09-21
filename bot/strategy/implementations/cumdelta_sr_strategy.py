@@ -550,7 +550,7 @@ class CumDeltaSRStrategy(BaseStrategy):
             if pnl_pct > self.config.trailing_stop_activation_pct:
                 df = self.get_primary_dataframe(market_data)
                 if df is not None:
-                    atr = self.calculate_atr_safe(df)
+                    atr = TechnicalIndicators.calculate_atr_safe(df, 14).value
                     trailing_distance = atr * 0.7
                     
                     if position_side == 'BUY':
