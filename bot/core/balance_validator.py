@@ -17,9 +17,9 @@ class BalanceValidator:
     """
 
     def __init__(self):
-        self.min_balance_reserve = 0.1  # 10% резерв баланса
+        self.min_balance_reserve = 0.05  # 5% резерв баланса (было 10% - слишком строго)
         self.max_leverage_multiplier = 0.8  # Используем только 80% от максимального плеча
-        self.emergency_balance_threshold = 0.05  # 5% - критический уровень баланса
+        self.emergency_balance_threshold = 0.02  # 2% - критический уровень баланса
 
     def validate_trade_balance(
         self,
@@ -57,7 +57,11 @@ class BalanceValidator:
 
             # Проверка 1: Достаточно ли свободного баланса
             balance_after_trade = available_balance - required_margin
-            min_required_balance = total_equity * self.min_balance_reserve
+            # Используем USDT баланс для резерва, а не весь эквити (который включает BTC)
+            usdt_balance = balance_info.get('usdt_balance', available_balance)
+            min_required_balance = usdt_balance * self.min_balance_reserve
+
+            logger.debug(f"💰 Проверка баланса: после_сделки={balance_after_trade:.2f}, мин_резерв={min_required_balance:.2f}")
 
             if balance_after_trade < min_required_balance:
                 return False, f"❌ Недостаточно баланса. Требуется: {required_margin:.4f}, доступно: {available_balance:.4f}", balance_info
@@ -122,7 +126,8 @@ class BalanceValidator:
                 'available_balance': total_available_balance,  # Общий доступный баланс
                 'used_margin': total_margin_balance - wallet_balance,
                 'total_equity': total_equity,  # Общий эквити (включая все валюты в USD)
-                'initial_equity': total_equity  # Сохраняем начальный капитал
+                'initial_equity': total_equity,  # Сохраняем начальный капитал
+                'usdt_balance': wallet_balance  # USDT баланс для расчета резерва
             }
 
         except Exception as e:
@@ -132,18 +137,24 @@ class BalanceValidator:
     def _calculate_required_margin(self, trade_amount: float, leverage: float, symbol: str) -> float:
         """Рассчитать необходимый маржин для позиции"""
         try:
-            # Упрощенный расчет - в реальности нужно учитывать текущую цену
-            # Для BTC примерно $50000, для других монет - соответственно
-            estimated_price = 50000.0  # Примерная цена BTC
-            position_value = trade_amount * estimated_price
+            # Для получения цены нам нужен API, но пока используем приблизительную
+            # TODO: передавать API объект для получения реальной цены
+            current_price = 114500.0  # Примерная цена BTC на сегодня
+            logger.debug(f"💰 Расчет маржина: amount={trade_amount}, price=${current_price:.2f}, leverage={leverage}")
+
+            position_value = trade_amount * current_price
             required_margin = position_value / max(leverage, 1.0)
 
             # Добавляем буфер 10% на комиссии и проскальзывание
-            return required_margin * 1.1
+            final_margin = required_margin * 1.1
+
+            logger.debug(f"💰 Позиция: ${position_value:.2f}, маржин: ${required_margin:.2f}, итого: ${final_margin:.2f}")
+            return final_margin
 
         except Exception as e:
             logger.error(f"❌ Ошибка расчета маржина: {e}")
-            return trade_amount * 50000 * 1.1  # Консервативная оценка
+            # Используем консервативную оценку с примерной ценой $100k
+            return trade_amount * 100000 * 1.1
 
     def _get_current_price(self, api, symbol: str) -> float:
         """Получить текущую цену символа"""

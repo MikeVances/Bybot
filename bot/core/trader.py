@@ -307,13 +307,27 @@ def get_current_balance(api):
     """Получение текущего баланса с обработкой ошибок"""
     try:
         balance_data = api.get_wallet_balance_v5()
+        logging.debug(f"💾 Balance API response: retCode={balance_data.get('retCode') if balance_data else 'None'}")
+
         if balance_data and balance_data.get('retCode') == 0:
             coins = balance_data['result']['list'][0]['coin']
+            logging.debug(f"💰 Found {len(coins)} coins in balance")
+
             usdt = next((c for c in coins if c['coin'] == 'USDT'), None)
             if usdt:
-                return float(usdt['walletBalance'])
+                balance = float(usdt['walletBalance'])
+                logging.debug(f"💵 USDT balance found: ${balance:.2f}")
+                return balance
+            else:
+                logging.warning("⚠️ USDT не найден в балансе")
+        else:
+            logging.error(f"❌ Неверный ответ API: {balance_data}")
     except Exception as e:
         logging.error(f"❌ Ошибка получения баланса: {e}")
+        import traceback
+        logging.error(f"📄 Traceback: {traceback.format_exc()}")
+
+    logging.warning("💸 Возвращаем баланс 0.0")
     return 0.0
 
 def get_current_price(all_market_data):
@@ -514,7 +528,7 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                     current_balance = balance_cache.get(balance_key)
                     if current_balance is None:
                         current_balance = get_current_balance(api)
-                        balance_cache.set(balance_key, current_balance)
+                        balance_cache.put(balance_key, current_balance)
 
                     if current_balance >= 10:  # Минимум для торговли
                         active_strategies.append(strategy_name)
@@ -559,7 +573,7 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
 
                     # Сохраняем в кэш только если получили данные
                     if all_market_data:
-                        market_data_cache.set(market_data_key, all_market_data)
+                        market_data_cache.put(market_data_key, all_market_data)
                         main_logger.debug("📊 Рыночные данные обновлены и закэшированы")
                     else:
                         main_logger.debug("📊 Используем закэшированные рыночные данные")

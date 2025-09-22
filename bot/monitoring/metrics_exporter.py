@@ -49,8 +49,14 @@ class MetricsExporter:
     def _update_system_metrics(self):
         """Обновление системных метрик"""
         try:
-            # CPU
-            cpu_percent = psutil.cpu_percent(interval=1)
+            # CPU (без блокировки, корректное чтение)
+            # Первый вызов инициализирует замер, второй дает корректное значение
+            if not hasattr(self, '_cpu_initialized'):
+                psutil.cpu_percent(interval=None)
+                self._cpu_initialized = True
+                cpu_percent = 0  # Для первого замера используем 0
+            else:
+                cpu_percent = psutil.cpu_percent(interval=None)
             cpu_count = psutil.cpu_count()
             
             # Память
@@ -78,21 +84,36 @@ class MetricsExporter:
             self.logger.error(f"Ошибка обновления системных метрик: {e}")
     
     def _update_bot_status(self):
-        """Обновление статуса ботов"""
+        """Обновление статуса ботов через проверку процессов"""
         try:
-            services = ['bybot-trading.service', 'bybot-telegram.service', 'lerabot.service']
             bot_status = {}
-            
-            for service in services:
+
+            # Сначала найдем все процессы
+            running_processes = []
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 try:
-                    result = subprocess.run(['/bin/systemctl', 'is-active', service], 
-                                          capture_output=True, text=True)
-                    status = result.stdout.strip()
-                    bot_status[service] = status
+                    if proc.info['cmdline']:
+                        cmdline = ' '.join(proc.info['cmdline'])
+                        if 'python' in cmdline:
+                            running_processes.append(cmdline)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+            # Проверяем каждый сервис
+            services_to_check = {
+                'bybot-trading.service': 'main.py',
+                'bybot-telegram.service': 'main.py',  # Telegram бот тоже работает через main.py
+                'lerabot.service': 'lerabot.py'
+            }
+
+            for service, process_name in services_to_check.items():
+                try:
+                    is_running = any(process_name in proc for proc in running_processes)
+                    bot_status[service] = 'active' if is_running else 'inactive'
                 except Exception as e:
                     bot_status[service] = 'unknown'
-                    self.logger.error(f"Ошибка проверки статуса {service}: {e}")
-            
+                    self.logger.error(f"Ошибка проверки процесса {process_name}: {e}")
+
             self.metrics['bot_status'] = bot_status
         except Exception as e:
             self.logger.error(f"Ошибка обновления статуса ботов: {e}")
@@ -213,15 +234,26 @@ class MetricsExporter:
         metrics_lines.append(f"# HELP neural_total_bets Total number of neural network bets")
         metrics_lines.append(f"# TYPE neural_total_bets counter")
         metrics_lines.append(f"neural_total_bets {neural.get('total_bets', 0)}")
-        
+
         metrics_lines.append(f"# HELP neural_winning_bets Number of winning bets")
         metrics_lines.append(f"# TYPE neural_winning_bets counter")
         metrics_lines.append(f"neural_winning_bets {neural.get('winning_bets', 0)}")
-        
+
         metrics_lines.append(f"# HELP neural_balance Current neural network balance")
         metrics_lines.append(f"# TYPE neural_balance gauge")
         metrics_lines.append(f"neural_balance {neural.get('current_balance', 1000.0)}")
-        
+
+        # Новые метрики оптимизаций (если доступны)
+        performance = self.metrics.get('performance_metrics', {})
+        if performance:
+            metrics_lines.append(f"# HELP strategy_latency_ms Average strategy execution latency")
+            metrics_lines.append(f"# TYPE strategy_latency_ms gauge")
+            metrics_lines.append(f"strategy_latency_ms {performance.get('avg_latency', 0)}")
+
+            metrics_lines.append(f"# HELP ttl_cache_hit_rate TTL cache hit rate percentage")
+            metrics_lines.append(f"# TYPE ttl_cache_hit_rate gauge")
+            metrics_lines.append(f"ttl_cache_hit_rate {performance.get('cache_hit_rate', 0)}")
+
         return '\n'.join(metrics_lines)
     
     def start_server(self):

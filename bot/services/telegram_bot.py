@@ -378,50 +378,123 @@ class TelegramBot:
             )
 
     async def _strategy_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать логи всех стратегий"""
+        """Показать активность и состояние всех стратегий"""
         try:
             # Используем правильные имена файлов логов
             strategy_logs = [
                 ('VolumeVWAP_v2', 'volume_vwap_default.log'),
-                ('CumDelta_SR_v2', 'cumdelta_sr_default.log'), 
+                ('CumDelta_SR_v2', 'cumdelta_sr_default.log'),
                 ('MultiTF_Volume_v2', 'multitf_volume_default.log'),
                 ('VolumeVWAP_v2_conservative', 'volume_vwap_conservative.log'),
                 ('FibonacciRSI', 'fibonacci_rsi_default.log'),
                 ('RangeTrading_v1', 'range_trading_default.log')
             ]
-            logs_text = f"📝 Логи стратегий:\n\n⏰ Обновлено: {datetime.now().strftime('%H:%M:%S')}\n\n"
-            
+
+            logs_text = f"📊 АКТИВНОСТЬ СТРАТЕГИЙ\n\n⏰ Обновлено: {datetime.now().strftime('%H:%M:%S')}\n\n"
+
+            # Счетчики для аналитики
+            active_strategies = 0
+            strategies_with_signals = 0
+            strategies_with_errors = 0
+
             for strategy_name, log_filename in strategy_logs:
                 # Формируем полный путь к файлу лога
                 log_file = f"data/logs/strategies/{log_filename}"
-                
+
                 if os.path.exists(log_file):
-                    # Читаем последние 3 строки лога
                     try:
                         with open(log_file, 'r', encoding='utf-8') as f:
                             lines = f.readlines()
-                            if lines:
-                                recent_lines = lines[-3:]  # Последние 3 строки
-                                logs_text += f"📊 {strategy_name}:\n"
-                                for line in recent_lines:
-                                    # Очищаем строку от лишних символов
-                                    clean_line = line.strip()
-                                    if clean_line:
-                                        # Обрезаем длинные строки
-                                        if len(clean_line) > 100:
-                                            clean_line = clean_line[:97] + "..."
-                                        # Не экранируем для обычного текста
-                                        logs_text += f"   {clean_line}\n"
-                                logs_text += "\n"
-                            else:
-                                logs_text += f"📊 {strategy_name}:\n"
-                                logs_text += f"   📭 Лог пуст\n\n"
+
+                        if lines:
+                            active_strategies += 1
+
+                            # Ищем важные события в последних 10 строках
+                            recent_lines = lines[-10:]
+
+                            # Анализируем типы событий
+                            signals = []
+                            errors = []
+                            warnings = []
+
+                            for line in recent_lines:
+                                line_clean = line.strip()
+                                if 'Сигнал:' in line and ('BUY' in line or 'SELL' in line):
+                                    # Извлекаем сигнал
+                                    if 'BUY' in line:
+                                        signals.append('🟢 BUY')
+                                    elif 'SELL' in line:
+                                        signals.append('🔴 SELL')
+                                elif 'ERROR' in line:
+                                    # Извлекаем суть ошибки
+                                    if 'БЛОКИРОВКА ПО БАЛАНСУ' in line:
+                                        errors.append('💰 Нет баланса')
+                                    elif 'Недостаточно баланса' in line:
+                                        errors.append('💰 Мало средств')
+                                    else:
+                                        errors.append('❌ Ошибка')
+                                elif 'WARNING' in line:
+                                    if 'Недостаточно средств' in line:
+                                        warnings.append('💸 $0.00')
+                                    else:
+                                        warnings.append('⚠️ Предупреждение')
+
+                            # Формируем краткий отчет
+                            strategy_short = strategy_name.replace('_v2', '').replace('_v1', '')
+                            logs_text += f"📊 {strategy_short}:\n"
+
+                            # Показываем последние сигналы
+                            if signals:
+                                strategies_with_signals += 1
+                                unique_signals = list(set(signals))
+                                logs_text += f"   🎯 Сигналы: {' '.join(unique_signals[:2])}\n"
+
+                            # Показываем проблемы
+                            if errors:
+                                strategies_with_errors += 1
+                                unique_errors = list(set(errors))
+                                logs_text += f"   ⚠️ Проблемы: {unique_errors[0]}\n"
+                            elif warnings:
+                                unique_warnings = list(set(warnings))
+                                logs_text += f"   💭 Статус: {unique_warnings[0]}\n"
+
+                            # Показываем время последней активности
+                            last_line = lines[-1].strip()
+                            if last_line:
+                                try:
+                                    # Извлекаем timestamp из лога (формат: 2025-09-22 07:21:11,819)
+                                    import re
+                                    time_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', last_line)
+                                    if time_match:
+                                        time_str = time_match.group(1).split(' ')[1][:5]  # HH:MM
+                                        logs_text += f"   🕐 Последняя активность: {time_str}\n"
+                                except:
+                                    pass
+
+                            logs_text += "\n"
+                        else:
+                            logs_text += f"📊 {strategy_name}:\n"
+                            logs_text += f"   📭 Лог пуст\n\n"
                     except Exception as e:
                         logs_text += f"📊 {strategy_name}:\n"
                         logs_text += f"   ❌ Ошибка чтения: {str(e)[:30]}...\n\n"
                 else:
                     logs_text += f"📊 {strategy_name}:\n"
                     logs_text += f"   📭 Файл лога не найден\n\n"
+
+            # Добавляем общую аналитику
+            logs_text += f"📈 ОБЩАЯ СТАТИСТИКА:\n"
+            logs_text += f"✅ Активных стратегий: {active_strategies}/6\n"
+            logs_text += f"🎯 С сигналами: {strategies_with_signals}\n"
+            logs_text += f"⚠️ С проблемами: {strategies_with_errors}\n"
+
+            # Определяем общий статус
+            if strategies_with_errors > 3:
+                logs_text += f"🔴 Общий статус: Проблемы с балансом\n"
+            elif strategies_with_signals > 0:
+                logs_text += f"🟢 Общий статус: Активная торговля\n"
+            else:
+                logs_text += f"🟡 Общий статус: Ожидание сигналов\n"
             
             keyboard = [
                 [
@@ -465,68 +538,127 @@ class TelegramBot:
         )
 
     async def _trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Показать последние сделки с деталями в стиле Freqtrade"""
+        """Показать последние торговые сигналы с детальной аналитикой оптимизированных стратегий"""
         try:
-            # Читаем журнал сделок
+            # Читаем журнал торговых сигналов
             journal_file = "data/trade_journal.csv"
             if not os.path.exists(journal_file):
-                trades_text = "📋 ПОСЛЕДНИЕ СДЕЛКИ\n\n"
-                trades_text += "❌ Нет данных о сделках\n"
+                trades_text = "📋 ТОРГОВЫЕ СИГНАЛЫ\n\n"
+                trades_text += "❌ Нет данных о сигналах\n"
                 trades_text += "📊 Файл trade_journal.csv не найден"
             else:
                 try:
-                    df = pd.read_csv(journal_file, quoting=1)  # QUOTE_ALL
-                except pd.errors.ParserError:
-                    # Если CSV поврежден, используем более надежный парсер
-                    df = pd.read_csv(journal_file, on_bad_lines='skip', engine='python')
+                    # Читаем CSV с правильной обработкой структуры данных
+                    # Реальная структура: 15 полей данных, но заголовок 11 полей
+                    import csv
 
-                if df.empty:
-                    trades_text = "📋 ПОСЛЕДНИЕ СДЕЛКИ\n\n"
-                    trades_text += "❌ Нет данных о сделках\n"
-                    trades_text += "📊 Файл trade_journal.csv пуст"
-                else:
-                    # Показываем последние 10 сделок
-                    recent_trades = df.tail(10)
-                    trades_text = "📋 ПОСЛЕДНИЕ СДЕЛКИ\n\n"
-                    
-                    for idx, trade in recent_trades.iterrows():
-                        strategy = trade.get('strategy', 'Unknown')
-                        signal = trade.get('signal', 'Unknown')
-                        entry_price = trade.get('entry_price', 'Unknown')
-                        stop_loss = trade.get('stop_loss', 'Unknown')
-                        take_profit = trade.get('take_profit', 'Unknown')
-                        comment = trade.get('comment', 'Unknown')
-                        tf = trade.get('tf', 'Unknown')
-                        timestamp = trade.get('timestamp', 'Unknown')
-                        
-                        # Определяем эмодзи для сигнала
-                        signal_emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
-                        
-                        # Форматируем цены
-                        entry_str = f"${entry_price:.2f}" if entry_price != 'Unknown' else 'Unknown'
-                        
-                        # Форматируем timestamp
-                        try:
-                            if timestamp != 'Unknown' and timestamp != '99':
-                                from datetime import datetime
-                                dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-                                time_str = dt.strftime("%H:%M")
-                            else:
+                    trades_data = []
+                    with open(journal_file, 'r', encoding='utf-8') as f:
+                        csv_reader = csv.reader(f)
+                        header = next(csv_reader)  # Пропускаем несовместимый заголовок
+
+                        # Реальная структура полей из trader.py
+                        real_fields = ['timestamp', 'strategy', 'signal', 'entry_price', 'stop_loss', 'take_profit',
+                                     'comment', 'tf', 'open', 'high', 'low', 'close', 'volume', 'signal_strength', 'risk_reward_ratio']
+
+                        for row in csv_reader:
+                            if len(row) >= len(real_fields):
+                                trade_dict = {field: row[i] for i, field in enumerate(real_fields)}
+                                trades_data.append(trade_dict)
+
+                    if not trades_data:
+                        trades_text = "📋 ТОРГОВЫЕ СИГНАЛЫ\n\n"
+                        trades_text += "❌ Нет данных о сигналах\n"
+                        trades_text += "📊 Файл пуст или поврежден"
+                    else:
+                        # Показываем последние 8 сигналов для удобной читаемости
+                        recent_trades = trades_data[-8:]
+                        trades_text = "📋 ТОРГОВЫЕ СИГНАЛЫ (оптимизированные)\n\n"
+
+                        for trade in recent_trades:
+                            strategy = trade.get('strategy', 'Unknown')
+                            signal = trade.get('signal', 'Unknown')
+                            entry_price = trade.get('entry_price', 'Unknown')
+                            tf = trade.get('tf', 'Unknown')
+                            signal_strength = trade.get('signal_strength', '0')
+                            comment = trade.get('comment', '')
+                            timestamp = trade.get('timestamp', '')
+
+                            # Определяем эмодзи для сигнала
+                            signal_emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "📊"
+
+                            # Форматируем цены
+                            try:
+                                entry_str = f"${float(entry_price):,.0f}" if entry_price != 'Unknown' else "N/A"
+                            except:
+                                entry_str = str(entry_price)[:8]
+
+                            # Форматируем силу сигнала (новая оптимизация!)
+                            try:
+                                strength = float(signal_strength)
+                                strength_emoji = "🔥" if strength > 0.8 else "⚡" if strength > 0.6 else "📊"
+                                strength_str = f"{strength:.2f}"
+                            except:
+                                strength_emoji = "📊"
+                                strength_str = "N/A"
+
+                            # Форматируем время
+                            try:
+                                if timestamp:
+                                    from datetime import datetime
+                                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                                    time_str = dt.strftime('%H:%M:%S')
+                                else:
+                                    time_str = "N/A"
+                            except:
                                 time_str = "N/A"
+
+                            # Короткое название стратегии
+                            strategy_short = strategy.replace('_trading_default', '').replace('_', ' ').title()
+
+                            trades_text += f"{signal_emoji} {strategy_short} {signal}\n"
+                            trades_text += f"💰 {entry_str} | ⏱️ {tf} | {strength_emoji} {strength_str}\n"
+                            trades_text += f"🕐 {time_str}\n\n"
+
+                        # Расширенная аналитика оптимизированной системы
+                        total_signals = len(trades_data)
+                        buy_signals = sum(1 for t in trades_data if t.get('signal') == 'BUY')
+                        sell_signals = sum(1 for t in trades_data if t.get('signal') == 'SELL')
+
+                        # Статистика по таймфреймам
+                        tf_stats = {}
+                        for trade in trades_data:
+                            tf = trade.get('tf', 'Unknown')
+                            tf_stats[tf] = tf_stats.get(tf, 0) + 1
+
+                        # Средняя сила сигналов (показатель качества оптимизаций)
+                        try:
+                            strengths = [float(t.get('signal_strength', 0)) for t in trades_data[-50:]]  # Последние 50
+                            avg_strength = sum(strengths) / len(strengths) if strengths else 0
+                            strength_quality = "🔥 Отлично" if avg_strength > 0.7 else "⚡ Хорошо" if avg_strength > 0.5 else "📊 Норма"
                         except:
-                            time_str = "N/A"
-                        
-                        trades_text += f"{signal_emoji} {strategy} {signal}\n"
-                        trades_text += f"💰 {entry_str} | ⏱️ {tf}\n"
-                        trades_text += f"📊 {time_str} | {comment}\n\n"
-                    
-                    # Добавляем краткую статистику
-                    total_trades = len(df)
-                    buy_signals = len(df[df['signal'] == 'BUY'])
-                    sell_signals = len(df[df['signal'] == 'SELL'])
-                    
-                    trades_text += f"📊 Статистика:\n"
-                    trades_text += f"📈 Всего: {total_trades} | 🟢 {buy_signals} | 🔴 {sell_signals}\n"
+                            avg_strength = 0
+                            strength_quality = "📊 N/A"
+
+                        trades_text += f"📊 АНАЛИТИКА ОПТИМИЗАЦИЙ:\n"
+                        trades_text += f"📈 Всего сигналов: {total_signals:,}\n"
+                        trades_text += f"🟢 Покупки: {buy_signals} | 🔴 Продажи: {sell_signals}\n"
+                        trades_text += f"⚡ Средняя сила: {avg_strength:.2f} ({strength_quality})\n\n"
+
+                        trades_text += f"⏰ Распределение по TF:\n"
+                        for tf, count in sorted(tf_stats.items()):
+                            percentage = count/total_signals*100 if total_signals > 0 else 0
+                            trades_text += f"• {tf}: {count} ({percentage:.1f}%)\n"
+
+                        # Сегодняшняя активность
+                        from datetime import datetime, timezone
+                        today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+                        today_signals = sum(1 for t in trades_data if t.get('timestamp', '').startswith(today))
+                        trades_text += f"\n🔥 Сегодня: {today_signals} сигналов"
+
+                except Exception as e:
+                    trades_text = f"❌ Ошибка чтения данных: {str(e)}\n\n"
+                    trades_text += "🔧 Проблема структуры CSV файла"
             
             keyboard = [
                 [
@@ -652,7 +784,7 @@ class TelegramBot:
         query = update.callback_query
         await query.answer()
         
-        if query.data == "menu_back":
+        if query.data == "menu_back" or query.data == "main_menu":
             await self._menu(update, context)
         elif query.data == "balance":
             await self._balance(update, context)
@@ -1049,60 +1181,83 @@ class TelegramBot:
                 metrics_text = response.text
                 
                 # Парсим основные метрики
-                prometheus_text = "📊 *Прометей - Мониторинг системы*\n\n"
-                
+                prometheus_text = "📊 Прометей - Мониторинг системы\n\n"
+
                 # Системные метрики
                 cpu_match = re.search(r'system_cpu_percent (\d+\.?\d*)', metrics_text)
                 memory_match = re.search(r'system_memory_percent (\d+\.?\d*)', metrics_text)
                 disk_match = re.search(r'system_disk_percent (\d+\.?\d*)', metrics_text)
-                
+
                 if cpu_match:
-                    prometheus_text += f"🖥️ CPU: {cpu_match.group(1)}%\n"
+                    cpu_val = float(cpu_match.group(1))
+                    cpu_emoji = "🔥" if cpu_val > 80 else "⚡" if cpu_val > 50 else "💚"
+                    prometheus_text += f"{cpu_emoji} CPU: {cpu_val:.1f}%\n"
                 if memory_match:
-                    prometheus_text += f"💾 Память: {memory_match.group(1)}%\n"
+                    mem_val = float(memory_match.group(1))
+                    mem_emoji = "🔴" if mem_val > 80 else "🟡" if mem_val > 60 else "🟢"
+                    prometheus_text += f"{mem_emoji} Память: {mem_val:.1f}%\n"
                 if disk_match:
-                    prometheus_text += f"💿 Диск: {disk_match.group(1)}%\n"
-                
-                prometheus_text += "\n🤖 *Статус ботов:*\n"
-                
-                # Статус ботов
+                    disk_val = float(disk_match.group(1))
+                    disk_emoji = "🔴" if disk_val > 90 else "🟡" if disk_val > 70 else "🟢"
+                    prometheus_text += f"{disk_emoji} Диск: {disk_val:.1f}%\n"
+
+                prometheus_text += "\n🤖 Статус ботов:\n"
+
+                # Статус ботов (исправленные названия метрик)
                 bot_statuses = {
-                    'bybot-trading_service': 'Торговый бот',
-                    'bybot-telegram_service': 'Telegram бот',
-                    'lerabot_service': 'LeraBot'
+                    'bot_status_bybot-trading_service': 'Торговый бот',
+                    'bot_status_bybot-telegram_service': 'Telegram бот',
+                    'bot_status_lerabot_service': 'LeraBot'
                 }
-                
+
                 for metric, name in bot_statuses.items():
                     match = re.search(f'{metric} (\\d+)', metrics_text)
                     if match:
                         status = "🟢 Активен" if match.group(1) == "1" else "🔴 Остановлен"
                         prometheus_text += f"• {name}: {status}\n"
-                
+
                 # Торговые метрики
                 signals_match = re.search(r'trading_total_signals (\d+)', metrics_text)
                 if signals_match:
-                    prometheus_text += f"\n📈 *Торговля:*\n"
-                    prometheus_text += f"• Всего сигналов: {signals_match.group(1)}\n"
-                
+                    signals_count = int(signals_match.group(1))
+                    signals_emoji = "🚀" if signals_count > 100 else "📈" if signals_count > 10 else "📊"
+                    prometheus_text += f"\n{signals_emoji} Торговля:\n"
+                    prometheus_text += f"• Всего сигналов: {signals_count}\n"
+
+                # Метрики производительности (новые оптимизации)
+                latency_match = re.search(r'strategy_latency_ms (\d+\.?\d*)', metrics_text)
+                cache_hit_match = re.search(r'ttl_cache_hit_rate (\d+\.?\d*)', metrics_text)
+
+                if latency_match or cache_hit_match:
+                    prometheus_text += f"\n⚡ Оптимизации:\n"
+                    if latency_match:
+                        latency = float(latency_match.group(1))
+                        latency_emoji = "🟢" if latency < 50 else "🟡" if latency < 100 else "🔴"
+                        prometheus_text += f"• {latency_emoji} Латентность: {latency:.1f}ms\n"
+                    if cache_hit_match:
+                        hit_rate = float(cache_hit_match.group(1))
+                        cache_emoji = "🟢" if hit_rate > 70 else "🟡" if hit_rate > 50 else "🔴"
+                        prometheus_text += f"• {cache_emoji} TTL кэш: {hit_rate:.1f}%\n"
+
                 # Метрики нейронной сети
                 neural_bets_match = re.search(r'neural_total_bets (\d+)', metrics_text)
                 neural_wins_match = re.search(r'neural_winning_bets (\d+)', metrics_text)
                 neural_balance_match = re.search(r'neural_balance (\d+\.?\d*)', metrics_text)
-                
+
                 if neural_bets_match:
-                    prometheus_text += f"\n🤖 *Нейронная сеть:*\n"
+                    prometheus_text += f"\n🤖 Нейронная сеть:\n"
                     prometheus_text += f"• Всего ставок: {neural_bets_match.group(1)}\n"
-                    
+
                     if neural_wins_match and neural_bets_match.group(1) != "0":
                         wins = int(neural_wins_match.group(1))
                         total = int(neural_bets_match.group(1))
                         win_rate = (wins / total) * 100
                         prometheus_text += f"• Выигрышных: {wins}\n"
                         prometheus_text += f"• Винрейт: {win_rate:.1f}%\n"
-                    
+
                     if neural_balance_match:
                         prometheus_text += f"• Баланс: ${neural_balance_match.group(1)}\n"
-                
+
                 prometheus_text += f"\n⏰ Обновлено: {datetime.now().strftime('%H:%M:%S')}"
                 
             else:
@@ -1496,7 +1651,7 @@ class TelegramBot:
             
             # Ранжирование стратегий
             ranking = neural_integration.get_strategy_ranking()
-            if ranking:
+            if ranking and len(ranking) > 0:
                 neural_text += "🏆 *Ранжирование стратегий:*\n"
                 for i, strategy in enumerate(ranking[:5], 1):
                     strategy_name = strategy['strategy'].replace('_', '\\_')
@@ -1505,6 +1660,10 @@ class TelegramBot:
                     neural_text += f"      ✅ Успешность: {strategy['success_rate']*100:.1f}%\n"
                     neural_text += f"      💰 Прибыль: {strategy['avg_profit']*100:.2f}%\n"
                     neural_text += f"      🟢 Покупки: {strategy['buy_signals']} \\| 🔴 Продажи: {strategy['sell_signals']}\n\n"
+            else:
+                neural_text += "🏆 *Ранжирование стратегий:*\n"
+                neural_text += "   📊 Пока нет данных для ранжирования\n"
+                neural_text += "   🔄 Накапливаются результаты стратегий\n\n"
             
             # Активные ставки
             neural_text += f"🔥 *Активные ставки:* {stats['active_bets']}\n"
@@ -1549,8 +1708,8 @@ class TelegramBot:
                 ]
             ]
             
-            # Для сообщений с данными API используем обычный текст без маркдаун
-            await self._edit_message_with_keyboard(update, context, neural_text, keyboard, parse_mode=None)
+            # Для сообщений с данными API используем Markdown V2
+            await self._edit_message_with_keyboard(update, context, neural_text, keyboard)
             
         except Exception as e:
             keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
@@ -1683,7 +1842,7 @@ class TelegramBot:
             from datetime import datetime, timezone
 
             # Системная информация
-            cpu_percent = psutil.cpu_percent(interval=1)
+            cpu_percent = psutil.cpu_percent(interval=None)
             memory = psutil.virtual_memory()
             disk = psutil.disk_usage('/')
 
@@ -1792,42 +1951,60 @@ class TelegramBot:
                 keyboard
             )
 
-    def send_admin_message(self, message: str):
+    def send_admin_message(self, message: str, with_menu: bool = False):
         """Отправка сообщения администратору"""
         try:
             import asyncio
             import threading
-            
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
             # Получаем chat_id из конфигурации или используем дефолтный
             admin_chat_id = ADMIN_CHAT_ID
             if not admin_chat_id:
                 print("[WARNING] ADMIN_CHAT_ID не настроен, сообщение не отправлено")
                 return
-            
+
             async def send_message():
                 try:
+                    reply_markup = None
+                    if with_menu:
+                        # Создаем кнопку главного меню
+                        keyboard = [[InlineKeyboardButton("📊 ГЛАВНОЕ МЕНЮ", callback_data="main_menu")]]
+                        reply_markup = InlineKeyboardMarkup(keyboard)
+
                     await self.app.bot.send_message(
                         chat_id=admin_chat_id,
                         text=message,
-                        parse_mode=None
+                        parse_mode=None,
+                        reply_markup=reply_markup
                     )
                 except Exception as e:
                     print(f"[ERROR] Ошибка отправки сообщения: {e}")
-            
-            # Запускаем в отдельном потоке с event loop
+
+            # Используем существующий event loop бота
             def run_async():
                 try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(send_message())
-                    loop.close()
+                    # Проверяем есть ли уже запущенный event loop
+                    try:
+                        loop = asyncio.get_running_loop()
+                        # Если loop уже есть, планируем выполнение
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(asyncio.run, send_message())
+                            future.result(timeout=10)
+                    except RuntimeError:
+                        # Нет активного loop, создаем новый
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(send_message())
+                        loop.close()
                 except Exception as e:
                     print(f"[ERROR] Ошибка event loop: {e}")
-            
+
             thread = threading.Thread(target=run_async)
             thread.start()
             thread.join(timeout=10)  # Ждем максимум 10 секунд
-            
+
         except Exception as e:
             print(f"[ERROR] Ошибка send_admin_message: {e}")
 
@@ -1842,10 +2019,17 @@ class TelegramBot:
             asyncio.set_event_loop(loop)
             try:
                 async def run_bot():
-                    await self.app.run_polling(drop_pending_updates=True, stop_signals=None)
+                    print("[DEBUG] Начинаем polling с обработкой команд...")
+                    print(f"[DEBUG] Токен длина: {len(self.token) if self.token else 'None'}")
+                    print(f"[DEBUG] Обработчики зарегистрированы: {len(self.app.handlers)}")
+                    await self.app.run_polling(drop_pending_updates=False, stop_signals=None)
+                print("[DEBUG] Запускаем run_bot() в event loop...")
                 loop.run_until_complete(run_bot())
+                print("[DEBUG] run_bot() завершен")
             except Exception as e:
                 print(f"[ERROR] Ошибка в thread_worker: {e}")
+                import traceback
+                traceback.print_exc()
             finally:
                 loop.close()
 
@@ -1856,13 +2040,16 @@ class TelegramBot:
 
     def start(self):
         """Запуск бота - всегда в отдельном потоке"""
+        print(f"[DEBUG] start() вызван, _is_running={self._is_running}")
         if self._is_running:
             print("[DEBUG] Telegram бот уже запущен, пропускаем...")
             return
 
         print("[DEBUG] Запуск Telegram бота в отдельном потоке...")
         self._is_running = True
+        print("[DEBUG] Флаг _is_running установлен в True")
         self._run_in_thread()
+        print("[DEBUG] _run_in_thread() завершен")
 
 if __name__ == "__main__":
     from config import TELEGRAM_TOKEN

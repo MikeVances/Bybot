@@ -289,7 +289,7 @@ def start_trading():
 🔒 Риск-менеджмент: активен
 🧠 Архитектура стратегий: v2.0"""
                 
-                telegram_bot.send_admin_message(startup_message)
+                telegram_bot.send_admin_message(startup_message, with_menu=True)
             except Exception as e:
                 logger.error(f"Ошибка отправки стартового уведомления: {e}")
         
@@ -523,9 +523,8 @@ def main():
                 telegram_bot = TelegramBot(token=config.TELEGRAM_TOKEN)
                 logger.info('✅ Telegram бот инициализирован')
                 
-                # Запускаем Telegram бота напрямую (без двойного тредирования)
-                telegram_bot._is_running = True
-                telegram_bot._run_in_thread()
+                # Запускаем Telegram бота используя стандартный метод start()
+                telegram_bot.start()
                 logger.info('✅ Telegram бот запущен')
                 
                 # Даем время Telegram боту запуститься

@@ -445,22 +445,22 @@ class MarketRegimeAnalyzer:
             # Пороги для классификации
             HIGH_VOL_THRESHOLD = 0.03
             TREND_THRESHOLD = 0.6
-            HIGH_MOMENTUM_THRESHOLD = 0.02
+            HIGH_MOMENTUM_THRESHOLD = 0.01  # Снижено с 0.02 до 0.01
             HIGH_VOLUME_THRESHOLD = 1.5
             CONSOLIDATION_THRESHOLD = 0.7
-            
+
             # Логика определения режима
-            
+
             # 1. Высокая волатильность
             if volatility > HIGH_VOL_THRESHOLD:
                 return MarketRegime.VOLATILE
-            
-            # 2. Сильный тренд
-            if trend_strength > TREND_THRESHOLD and momentum > HIGH_MOMENTUM_THRESHOLD:
+
+            # 2. Сильный тренд - приоритет для сильного тренда
+            if trend_strength > TREND_THRESHOLD:
                 return MarketRegime.TRENDING
-            
-            # 3. Консолидация/боковик
-            if consolidation > CONSOLIDATION_THRESHOLD or trend_strength < 0.3:
+
+            # 3. Консолидация/боковик - только если тренд слабый
+            if consolidation > CONSOLIDATION_THRESHOLD and trend_strength < 0.5:
                 return MarketRegime.SIDEWAYS
             
             # 4. Высокая объемная активность
