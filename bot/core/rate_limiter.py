@@ -122,7 +122,12 @@ class AggressiveRateLimiter:
         # 📊 ГЛОБАЛЬНЫЕ ЛИМИТЫ
         self._global_requests_per_minute = 200
         self._global_requests_per_second = 20
-        
+
+        # 🔄 АДАПТИВНЫЕ НАСТРОЙКИ
+        self.adaptive_delays = {}
+        self.success_streak = {}
+        self.failure_streak = {}
+
         # 📝 СТАТИСТИКА
         self._stats = {
             'total_requests': 0,
@@ -394,17 +399,17 @@ class AggressiveRateLimiter:
             
             # Можно добавить уведомления (Telegram, email, etc.)
     
-    def can_make_request(self, request_type: str, client_id: str = "default", 
+    def can_make_request(self, request_type: str, client_id: str = "default",
                         symbol: str = None) -> bool:
         """
-        🔍 ПРОВЕРКА ВОЗМОЖНОСТИ ВЫПОЛНЕНИЯ ЗАПРОСА
+        🔍 ПРОВЕРКА ВОЗМОЖНОСТИ ВЫПОЛНЕНИЯ ЗАПРОСА с адаптивными задержками
         Безопасная проверка без исключений
-        
+
         Args:
             request_type: Тип запроса
             client_id: ID клиента
             symbol: Символ (опционально)
-            
+
         Returns:
             bool: True если запрос можно выполнить
         """
@@ -414,16 +419,19 @@ class AggressiveRateLimiter:
                 # Проверяем emergency stop
                 if self._emergency_stop:
                     return False
-                
+
                 # Проверяем заблокированных клиентов
                 if client_id in self._banned_clients:
                     ban_time = self._banned_clients[client_id]
                     if datetime.now() < ban_time:
                         return False
-                
+
+                # 🔄 АДАПТИВНЫЕ ЗАДЕРЖКИ на основе состояния API
+                self._apply_adaptive_delays(request_type)
+
                 # Проверяем лимиты без их нарушения
                 return self._can_make_request_internal(request_type, client_id, symbol)
-                
+
         except Exception:
             # В случае любой ошибки возвращаем False (безопасная позиция)
             return False
@@ -464,6 +472,48 @@ class AggressiveRateLimiter:
             
         except Exception:
             return False
+
+    def _apply_adaptive_delays(self, endpoint: str):
+        """Применение адаптивных задержек на основе состояния API"""
+        try:
+            # Получаем текущее состояние подключения
+            from bot.core.enhanced_api_connection import get_enhanced_connection_manager
+            connection_manager = get_enhanced_connection_manager()
+
+            if connection_manager:
+                health = connection_manager.get_connection_health()
+
+                # Адаптируем задержки в зависимости от состояния API
+                if health['state'] == 'degraded':
+                    self.adaptive_delays[endpoint] = 2.0  # Удваиваем задержку
+                elif health['state'] == 'unstable':
+                    self.adaptive_delays[endpoint] = 3.0  # Утраиваем задержку
+                elif health['state'] == 'healthy':
+                    # Постепенно уменьшаем задержку при стабильной работе
+                    current_delay = self.adaptive_delays.get(endpoint, 1.0)
+                    self.adaptive_delays[endpoint] = max(0.5, current_delay * 0.9)
+        except ImportError:
+            # Enhanced connection manager недоступен
+            pass
+
+    def record_api_success(self, endpoint: str):
+        """Записать успешный API вызов"""
+        self.success_streak[endpoint] = self.success_streak.get(endpoint, 0) + 1
+        self.failure_streak[endpoint] = 0
+
+        # Уменьшаем задержку при успешных запросах
+        if self.success_streak[endpoint] >= 5:
+            current_delay = self.adaptive_delays.get(endpoint, 1.0)
+            self.adaptive_delays[endpoint] = max(0.1, current_delay * 0.8)
+
+    def record_api_failure(self, endpoint: str):
+        """Записать неудачный API вызов"""
+        self.failure_streak[endpoint] = self.failure_streak.get(endpoint, 0) + 1
+        self.success_streak[endpoint] = 0
+
+        # Увеличиваем задержку при неудачах
+        current_delay = self.adaptive_delays.get(endpoint, 1.0)
+        self.adaptive_delays[endpoint] = min(10.0, current_delay * 1.5)
 
     def deactivate_emergency_stop(self, admin_override: bool = False) -> bool:
         """Деактивация emergency stop (только администратором)"""

@@ -523,12 +523,30 @@ def main():
                 telegram_bot = TelegramBot(token=config.TELEGRAM_TOKEN)
                 logger.info('✅ Telegram бот инициализирован')
                 
-                # Запускаем Telegram бота используя стандартный метод start()
-                telegram_bot.start()
-                logger.info('✅ Telegram бот запущен')
-                
+                # Запускаем Telegram бота в отдельном потоке с собственным event loop
+                import threading
+                import asyncio
+
+                def run_telegram_bot():
+                    """Запуск Telegram бота в отдельном потоке с новым event loop"""
+                    try:
+                        # Создаем новый event loop для этого потока
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+
+                        # Запускаем бота
+                        telegram_bot.start()
+                        logger.info('✅ Telegram бот запущен в отдельном потоке')
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка Telegram бота в потоке: {e}")
+
+                # Запускаем в отдельном потоке
+                telegram_thread = threading.Thread(target=run_telegram_bot, daemon=True, name="TelegramBotThread")
+                telegram_thread.start()
+
                 # Даем время Telegram боту запуститься
                 time.sleep(3)
+                logger.info('✅ Telegram бот запущен в отдельном потоке')
             except Exception as e:
                 logger.error(f'❌ Ошибка инициализации Telegram бота: {e}')
                 telegram_bot = None

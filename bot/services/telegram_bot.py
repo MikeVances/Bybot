@@ -118,6 +118,8 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("profit", self._profit))
         self.app.add_handler(CommandHandler("logs", self._logs))
         self.app.add_handler(CommandHandler("all_strategies", self._all_strategies))
+        self.app.add_handler(CommandHandler("api", self._cmd_api_health))
+        self.app.add_handler(CommandHandler("blocks", self._cmd_blocks))
         self.app.add_handler(CallbackQueryHandler(self._on_menu_button))
         self.app.add_handler(CallbackQueryHandler(self._on_strategy_toggle))
         self.app.add_handler(CallbackQueryHandler(self._on_profit_button, pattern="^profit"))
@@ -2007,6 +2009,113 @@ class TelegramBot:
 
         except Exception as e:
             print(f"[ERROR] Ошибка send_admin_message: {e}")
+
+    async def _cmd_api_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать здоровье API подключений"""
+        try:
+            from bot.monitoring.api_health_monitor import get_api_health_monitor
+
+            monitor = get_api_health_monitor()
+            dashboard = monitor.get_dashboard_data()
+
+            if dashboard['status'] == 'no_data':
+                await update.message.reply_text("📊 API мониторинг не активен")
+                return
+
+            current = dashboard['current']
+            hourly = dashboard['hourly_stats']
+            alerts = dashboard['alerts']
+
+            # Эмодзи для статусов
+            state_emoji = {
+                'healthy': '🟢',
+                'degraded': '🟡',
+                'unstable': '🟠',
+                'failed': '🔴',
+                'maintenance': '🔵'
+            }
+
+            alert_emoji = {
+                'ok': '✅',
+                'warning': '⚠️',
+                'critical': '🚨'
+            }
+
+            message = f"""📊 API HEALTH STATUS
+
+🔌 Подключение: {state_emoji.get(current['connection_state'], '❓')} {current['connection_state']}
+⏱️ Время отклика: {current['response_time']:.2f}s {alert_emoji.get(alerts['response_time_status'], '❓')}
+❌ Частота ошибок: {current['failure_rate']*100:.1f}% {alert_emoji.get(alerts['failure_rate_status'], '❓')}
+🔄 Подряд неудач: {current['consecutive_failures']}
+🗂️ Cache hit rate: {current['cache_hit_rate']*100:.1f}%
+📁 Кэшировано: {current['cached_items']} записей
+
+📈 СТАТИСТИКА ЗА ЧАС:
+⏱️ Среднее время: {hourly['avg_response_time']:.2f}s
+❌ Средняя частота ошибок: {hourly['avg_failure_rate']*100:.1f}%
+📊 Всего запросов: {hourly['total_requests']}
+🔍 Точек данных: {hourly['data_points']}"""
+
+            await update.message.reply_text(message)
+
+        except ImportError:
+            await update.message.reply_text("📊 API мониторинг недоступен - модуль не инициализирован")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка получения API статуса: {e}")
+
+    async def _cmd_blocks(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Показать информацию о блокировках"""
+        try:
+            from bot.core.blocking_alerts import get_blocking_alerts_manager
+
+            manager = get_blocking_alerts_manager()
+            stats = manager.get_blocking_stats()
+            active_blocks = manager.get_active_blocks()
+
+            # Автоматически решаем устаревшие блокировки
+            resolved_count = manager.auto_resolve_expired_blocks()
+            if resolved_count > 0:
+                manager.logger.info(f"✅ Автоматически решено {resolved_count} устаревших блокировок")
+
+            message = f"""🚫 СТАТУС БЛОКИРОВОК
+
+📊 Всего блокировок: {stats['total_blocks']}
+🔴 Активных: {stats.get('active_blocks', 0)}
+📅 За последние 24ч: {stats.get('last_24h', 0)}
+⏰ За последний час: {stats.get('last_1h', 0)}
+
+📋 По причинам:"""
+
+            for reason, count in stats.get('by_reason', {}).items():
+                message += f"\n• {reason}: {count}"
+
+            if stats.get('most_common_reason') != 'none':
+                message += f"\n\n🔥 Частая причина: {stats['most_common_reason']}"
+
+            if active_blocks:
+                message += f"\n\n🚨 АКТИВНЫЕ БЛОКИРОВКИ ({len(active_blocks)}):"
+                for block in active_blocks[-5:]:  # Последние 5
+                    severity_emoji = {"CRITICAL": "🚨", "HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}
+                    emoji = severity_emoji.get(block.severity, "⚠️")
+                    message += f"\n{emoji} {block.strategy} ({block.symbol}): {block.message}"
+            else:
+                message += "\n\n✅ Активных блокировок нет"
+
+            # Последние блокировки
+            recent = stats.get('recent_blocks', [])
+            if recent:
+                message += f"\n\n📋 ПОСЛЕДНИЕ БЛОКИРОВКИ:"
+                for block in recent[-3:]:  # Последние 3
+                    severity_emoji = {"CRITICAL": "🚨", "HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}
+                    emoji = severity_emoji.get(block['severity'], "⚠️")
+                    message += f"\n{emoji} {block['timestamp']} - {block['strategy']}: {block['message']}"
+
+            await update.message.reply_text(message)
+
+        except ImportError:
+            await update.message.reply_text("🚫 Система блокировок недоступна - модуль не инициализирован")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Ошибка получения статуса блокировок: {e}")
 
     def _run_in_thread(self):
         """Запуск бота в отдельном потоке для избежания конфликтов event loop"""

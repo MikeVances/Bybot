@@ -1,453 +1,318 @@
-# bot/core/blocking_alerts.py
 """
-🚨 СИСТЕМА ОПОВЕЩЕНИЙ О БЛОКИРОВКЕ ТОРГОВЛИ
-КРИТИЧЕСКИ ВАЖНО: Каждая блокировка должна быть ГРОМКО озвучена!
-
-Функции:
-- Мгновенные уведомления в Telegram о любых блокировках
-- Периодические отчеты о состоянии торговли
-- Диагностика причин блокировки
-- Эскалация при длительной блокировке
+🚨 СИСТЕМА УВЕДОМЛЕНИЙ О БЛОКИРОВКАХ ТОРГОВЛИ
+Уведомляет пользователя о каждой блокировке ордера с детальным объяснением
 """
 
-import threading
-import time
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
-import json
 
-
-class BlockType(Enum):
-    """Типы блокировок"""
-    POSITION_CONFLICT = "position_conflict"
-    RATE_LIMIT = "rate_limit"
+class BlockingReason(Enum):
+    """Причины блокировки торговли"""
     EMERGENCY_STOP = "emergency_stop"
-    DUPLICATE_ORDER = "duplicate_order"
     RISK_LIMIT = "risk_limit"
+    RATE_LIMIT = "rate_limit"
     API_ERROR = "api_error"
-    INSUFFICIENT_BALANCE = "insufficient_balance"
-    UNKNOWN = "unknown"
-
-
-class Severity(Enum):
-    """Уровни критичности"""
-    LOW = "low"           # Единичная блокировка
-    MEDIUM = "medium"     # Повторяющиеся блокировки
-    HIGH = "high"         # Массовые блокировки
-    CRITICAL = "critical" # Полная остановка торговли
-
+    STRATEGY_FILTER = "strategy_filter"
+    ORDER_CONFLICT = "order_conflict"
+    POSITION_LIMIT = "position_limit"
+    BALANCE_INSUFFICIENT = "balance_insufficient"
+    API_PERFORMANCE = "api_performance"
 
 @dataclass
-class BlockEvent:
-    """Событие блокировки"""
+class BlockingAlert:
+    """Уведомление о блокировке"""
     timestamp: datetime
-    block_type: BlockType
-    severity: Severity
+    reason: BlockingReason
     symbol: str
     strategy: str
-    reason: str
+    message: str
+    severity: str
     details: Dict[str, Any]
-    telegram_sent: bool = False
-
+    resolved: bool = False
 
 class BlockingAlertsManager:
-    """
-    🚨 МЕНЕДЖЕР ОПОВЕЩЕНИЙ О БЛОКИРОВКАХ
-
-    Отслеживает все блокировки и громко о них сообщает!
-    """
+    """Менеджер уведомлений о блокировках"""
 
     def __init__(self, telegram_bot=None):
-        self.telegram_bot = telegram_bot
         self.logger = logging.getLogger('blocking_alerts')
+        self.telegram_bot = telegram_bot
+        self.active_blocks = {}  # {key: BlockingAlert}
+        self.block_history = []
+        self.notification_cooldown = {}  # Предотвращение спама
 
-        # История блокировок
-        self.block_events: List[BlockEvent] = []
-        self.last_alert_time = {}
-
-        # Счетчики для анализа
-        self.block_counters = {block_type: 0 for block_type in BlockType}
-        self.consecutive_blocks = 0
-        self.last_successful_trade = None
-
-        # Thread safety
-        self._lock = threading.RLock()
-
-        # Настройки
-        self.alert_cooldown = 300  # 5 минут между повторными уведомлениями одного типа
-        self.escalation_threshold = 10  # Эскалация после 10 блокировок
-        self.critical_threshold = 50   # Критичный уровень после 50 блокировок
-
-        # Запускаем фоновый мониторинг
-        self._start_monitoring_thread()
-
-        self.logger.info("🚨 BlockingAlertsManager активирован - все блокировки будут озвучены!")
-
-    def report_block(self, block_type: BlockType, symbol: str, strategy: str,
-                    reason: str, details: Dict[str, Any] = None) -> None:
+    def report_order_block(self, reason: str, symbol: str, strategy: str,
+                          message: str, details: Dict[str, Any] = None) -> None:
         """
-        🚨 ОСНОВНАЯ ФУНКЦИЯ: Сообщить о блокировке
+        Сообщить о блокировке ордера
 
         Args:
-            block_type: Тип блокировки
-            symbol: Торговая пара
-            strategy: Стратегия
             reason: Причина блокировки
+            symbol: Торговый инструмент
+            strategy: Название стратегии
+            message: Человекочитаемое сообщение
             details: Дополнительные детали
         """
-        with self._lock:
-            # Определяем критичность
-            severity = self._calculate_severity(block_type)
+        try:
+            # Определяем серьезность
+            severity = self._get_severity(reason)
 
-            # Создаем событие
-            event = BlockEvent(
-                timestamp=datetime.now(timezone.utc),
-                block_type=block_type,
-                severity=severity,
+            # Создаем уведомление
+            alert = BlockingAlert(
+                timestamp=datetime.now(),
+                reason=BlockingReason(reason),
                 symbol=symbol,
                 strategy=strategy,
-                reason=reason,
+                message=message,
+                severity=severity,
                 details=details or {}
             )
 
-            # Добавляем в историю
-            self.block_events.append(event)
-            self.block_counters[block_type] += 1
-            self.consecutive_blocks += 1
+            # Ключ для отслеживания
+            alert_key = f"{reason}_{symbol}_{strategy}"
 
-            # Логируем локально
-            self._log_block_event(event)
+            # Проверяем cooldown для предотвращения спама
+            if self._should_notify(alert_key, severity):
+                self._send_notification(alert)
+                self.notification_cooldown[alert_key] = datetime.now()
 
-            # Отправляем уведомление
-            self._send_block_notification(event)
+            # Сохраняем в истории
+            self.active_blocks[alert_key] = alert
+            self.block_history.append(alert)
 
-            # Проверяем эскалацию
-            self._check_escalation()
+            # Ограничиваем историю (последние 1000 записей)
+            if len(self.block_history) > 1000:
+                self.block_history = self.block_history[-1000:]
 
-            # Ограничиваем историю
-            if len(self.block_events) > 1000:
-                self.block_events = self.block_events[-500:]
+            # Логируем
+            self.logger.warning(
+                f"🚫 БЛОКИРОВКА: {strategy} ({symbol}) - {message}"
+            )
 
-    def report_successful_trade(self, symbol: str, strategy: str, order_id: str) -> None:
-        """Сообщить об успешной сделке (сбрасывает счетчики)"""
-        with self._lock:
-            self.consecutive_blocks = 0
-            self.last_successful_trade = datetime.now(timezone.utc)
+        except Exception as e:
+            self.logger.error(f"Ошибка при сообщении о блокировке: {e}")
 
-            # Отправляем уведомление о восстановлении торговли если было много блокировок
-            if sum(self.block_counters.values()) > 5:
-                self._send_recovery_notification(symbol, strategy, order_id)
+    def _get_severity(self, reason: str) -> str:
+        """Определить серьезность блокировки"""
+        severity_map = {
+            "emergency_stop": "CRITICAL",
+            "risk_limit": "HIGH",
+            "api_error": "HIGH",
+            "api_performance": "HIGH",
+            "rate_limit": "MEDIUM",
+            "position_limit": "MEDIUM",
+            "balance_insufficient": "MEDIUM",
+            "strategy_filter": "LOW",
+            "order_conflict": "MEDIUM"
+        }
+        return severity_map.get(reason, "MEDIUM")
 
-    def _calculate_severity(self, block_type: BlockType) -> Severity:
-        """Определение критичности блокировки"""
+    def _should_notify(self, alert_key: str, severity: str) -> bool:
+        """Проверить, нужно ли отправлять уведомление"""
+        last_notification = self.notification_cooldown.get(alert_key)
 
-        # Критичные типы блокировок
-        if block_type in [BlockType.EMERGENCY_STOP, BlockType.POSITION_CONFLICT]:
-            if self.consecutive_blocks >= self.critical_threshold:
-                return Severity.CRITICAL
-            elif self.consecutive_blocks >= self.escalation_threshold:
-                return Severity.HIGH
+        if not last_notification:
+            return True
+
+        # Cooldown периоды по серьезности
+        cooldown_minutes = {
+            "CRITICAL": 0,    # Всегда уведомлять
+            "HIGH": 5,       # 5 минут
+            "MEDIUM": 15,    # 15 минут
+            "LOW": 60        # 1 час
+        }
+
+        cooldown = cooldown_minutes.get(severity, 15)
+        return datetime.now() - last_notification > timedelta(minutes=cooldown)
+
+    def _send_notification(self, alert: BlockingAlert) -> None:
+        """Отправить уведомление"""
+
+        # Форматируем сообщение
+        severity_emoji = {
+            "CRITICAL": "🚨",
+            "HIGH": "🔴",
+            "MEDIUM": "🟡",
+            "LOW": "🟢"
+        }
+
+        emoji = severity_emoji.get(alert.severity, "⚠️")
+
+        notification_text = f"""{emoji} БЛОКИРОВКА ТОРГОВЛИ
+
+📊 Стратегия: {alert.strategy}
+💰 Символ: {alert.symbol}
+⚠️ Причина: {alert.message}
+🔒 Уровень: {alert.severity}
+⏰ Время: {alert.timestamp.strftime('%H:%M:%S')}
+
+📋 Детали: {self._format_details(alert.details)}
+
+💡 Что делать: {self._get_recommendation(alert.reason.value)}"""
+
+        # Отправляем через Telegram если доступен
+        if self.telegram_bot:
+            try:
+                self.telegram_bot.send_admin_message(notification_text)
+            except Exception as e:
+                self.logger.error(f"Ошибка отправки Telegram: {e}")
+
+        # Также логируем критические уведомления
+        if alert.severity == "CRITICAL":
+            self.logger.critical(notification_text)
+
+    def _format_details(self, details: Dict[str, Any]) -> str:
+        """Форматировать детали для уведомления"""
+        if not details:
+            return "Нет дополнительной информации"
+
+        formatted = []
+        for key, value in details.items():
+            if key == 'current_balance':
+                formatted.append(f"Баланс: ${value:.2f}")
+            elif key == 'limit_value':
+                formatted.append(f"Лимит: {value}")
+            elif key == 'actual_value':
+                formatted.append(f"Текущее: {value}")
+            elif key == 'response_time':
+                formatted.append(f"Время отклика: {value:.2f}s")
+            elif key == 'failure_rate':
+                formatted.append(f"Частота ошибок: {value*100:.1f}%")
             else:
-                return Severity.MEDIUM
+                formatted.append(f"{key}: {value}")
 
-        # Средние типы
-        elif block_type in [BlockType.RATE_LIMIT, BlockType.RISK_LIMIT]:
-            if self.consecutive_blocks >= 20:
-                return Severity.HIGH
-            else:
-                return Severity.MEDIUM
+        return ", ".join(formatted)
 
-        # Низкие типы
-        else:
-            return Severity.LOW
+    def _get_recommendation(self, reason: str) -> str:
+        """Получить рекомендацию по решению проблемы"""
+        recommendations = {
+            "emergency_stop": "Проверьте логи на критические ошибки, перезапустите систему",
+            "risk_limit": "Увеличьте лимиты риска или дождитесь сброса дневных лимитов",
+            "rate_limit": "Подождите несколько минут, система автоматически возобновит работу",
+            "api_error": "Проверьте подключение к интернету и статус Bybit API",
+            "api_performance": "API работает медленно, система автоматически адаптируется",
+            "strategy_filter": "Нормальная работа, стратегия отфильтровала слабый сигнал",
+            "order_conflict": "Проверьте открытые позиции и ордера",
+            "position_limit": "Уменьшите размер позиции или увеличьте лимиты",
+            "balance_insufficient": "Пополните баланс или уменьшите размер сделок"
+        }
+        return recommendations.get(reason, "Обратитесь к документации или логам системы")
 
-    def _log_block_event(self, event: BlockEvent) -> None:
-        """Логирование блокировки"""
-        level = {
-            Severity.LOW: logging.WARNING,
-            Severity.MEDIUM: logging.ERROR,
-            Severity.HIGH: logging.CRITICAL,
-            Severity.CRITICAL: logging.CRITICAL
-        }[event.severity]
+    def get_active_blocks(self) -> List[BlockingAlert]:
+        """Получить список активных блокировок"""
+        return [alert for alert in self.active_blocks.values() if not alert.resolved]
 
-        emoji = {
-            Severity.LOW: "⚠️",
-            Severity.MEDIUM: "🚫",
-            Severity.HIGH: "🚨",
-            Severity.CRITICAL: "💀"
-        }[event.severity]
+    def resolve_block(self, alert_key: str) -> bool:
+        """Пометить блокировку как решенную"""
+        if alert_key in self.active_blocks:
+            self.active_blocks[alert_key].resolved = True
+            del self.active_blocks[alert_key]
+            self.logger.info(f"✅ Блокировка решена: {alert_key}")
+            return True
+        return False
 
-        self.logger.log(level, f"{emoji} БЛОКИРОВКА {event.block_type.value.upper()}: "
-                             f"{event.strategy} на {event.symbol} - {event.reason}")
+    def auto_resolve_expired_blocks(self) -> int:
+        """Автоматически решить устаревшие блокировки"""
+        resolved_count = 0
+        current_time = datetime.now()
 
-    def _send_block_notification(self, event: BlockEvent) -> None:
-        """Отправка уведомления в Telegram"""
-        if not self.telegram_bot:
-            return
+        # Время автоматического решения по типу блокировки
+        auto_resolve_times = {
+            "rate_limit": timedelta(minutes=10),
+            "api_error": timedelta(minutes=15),
+            "api_performance": timedelta(minutes=20),
+            "strategy_filter": timedelta(minutes=5),
+        }
 
-        # Проверяем cooldown для данного типа блокировки
-        cooldown_key = f"{event.block_type.value}_{event.symbol}"
-        now = datetime.now(timezone.utc)
+        keys_to_resolve = []
+        for key, alert in self.active_blocks.items():
+            if alert.resolved:
+                continue
 
-        if cooldown_key in self.last_alert_time:
-            time_diff = (now - self.last_alert_time[cooldown_key]).total_seconds()
-            if time_diff < self.alert_cooldown and event.severity != Severity.CRITICAL:
-                return  # Пропускаем повторное уведомление
+            auto_resolve_time = auto_resolve_times.get(alert.reason.value)
+            if auto_resolve_time and (current_time - alert.timestamp) > auto_resolve_time:
+                keys_to_resolve.append(key)
 
-        # Формируем сообщение
-        emoji = {
-            Severity.LOW: "⚠️",
-            Severity.MEDIUM: "🚫",
-            Severity.HIGH: "🚨",
-            Severity.CRITICAL: "💀🚨💀"
-        }[event.severity]
+        for key in keys_to_resolve:
+            self.resolve_block(key)
+            resolved_count += 1
 
-        severity_text = {
-            Severity.LOW: "Предупреждение",
-            Severity.MEDIUM: "Ошибка",
-            Severity.HIGH: "КРИТИЧЕСКАЯ ОШИБКА",
-            Severity.CRITICAL: "🚨 АВАРИЙНАЯ СИТУАЦИЯ 🚨"
-        }[event.severity]
+        return resolved_count
 
-        message = f"""
-{emoji} {severity_text}
+    def get_blocking_stats(self) -> Dict[str, Any]:
+        """Получить статистику блокировок"""
+        total_blocks = len(self.block_history)
 
-🚫 ТОРГОВЛЯ ЗАБЛОКИРОВАНА!
+        if total_blocks == 0:
+            return {"total_blocks": 0, "message": "Блокировок не было"}
 
-📊 Детали:
-• Тип: {event.block_type.value.replace('_', ' ').title()}
-• Символ: {event.symbol}
-• Стратегия: {event.strategy}
-• Причина: {event.reason}
+        # Считаем по причинам
+        by_reason = {}
+        by_severity = {}
 
-📈 Статистика:
-• Подряд блокировок: {self.consecutive_blocks}
-• Всего блокировок: {sum(self.block_counters.values())}
-• Последняя сделка: {self._format_last_trade()}
+        for alert in self.block_history:
+            reason = alert.reason.value
+            severity = alert.severity
 
-⏰ Время: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S UTC')}
-"""
+            by_reason[reason] = by_reason.get(reason, 0) + 1
+            by_severity[severity] = by_severity.get(severity, 0) + 1
 
-        if event.severity == Severity.CRITICAL:
-            message += f"\n💀 ТРЕБУЕТСЯ НЕМЕДЛЕННОЕ ВМЕШАТЕЛЬСТВО!"
-            message += f"\n🔧 Проверьте состояние системы и позиции"
+        # Активные блокировки
+        active_blocks = self.get_active_blocks()
 
-        try:
-            self.telegram_bot.send_admin_message(message)
-            event.telegram_sent = True
-            self.last_alert_time[cooldown_key] = now
+        return {
+            "total_blocks": total_blocks,
+            "active_blocks": len(active_blocks),
+            "by_reason": by_reason,
+            "by_severity": by_severity,
+            "last_24h": len([a for a in self.block_history
+                           if datetime.now() - a.timestamp < timedelta(hours=24)]),
+            "last_1h": len([a for a in self.block_history
+                          if datetime.now() - a.timestamp < timedelta(hours=1)]),
+            "most_common_reason": max(by_reason.items(), key=lambda x: x[1])[0] if by_reason else "none",
+            "recent_blocks": [
+                {
+                    "strategy": alert.strategy,
+                    "symbol": alert.symbol,
+                    "reason": alert.reason.value,
+                    "message": alert.message,
+                    "timestamp": alert.timestamp.strftime('%H:%M:%S'),
+                    "severity": alert.severity
+                }
+                for alert in self.block_history[-10:]  # Последние 10
+            ]
+        }
 
-            self.logger.info(f"📱 Уведомление о блокировке отправлено в Telegram")
+    def clear_old_history(self, hours: int = 24) -> int:
+        """Очистить старую историю блокировок"""
+        cutoff_time = datetime.now() - timedelta(hours=hours)
+        initial_count = len(self.block_history)
 
-        except Exception as e:
-            self.logger.error(f"❌ Ошибка отправки уведомления в Telegram: {e}")
+        self.block_history = [
+            alert for alert in self.block_history
+            if alert.timestamp > cutoff_time
+        ]
 
-    def _send_recovery_notification(self, symbol: str, strategy: str, order_id: str) -> None:
-        """Уведомление о восстановлении торговли"""
-        if not self.telegram_bot:
-            return
+        cleared_count = initial_count - len(self.block_history)
+        if cleared_count > 0:
+            self.logger.info(f"🧹 Очищено {cleared_count} старых блокировок")
 
-        total_blocks = sum(self.block_counters.values())
+        return cleared_count
 
-        message = f"""
-✅ ТОРГОВЛЯ ВОССТАНОВЛЕНА!
-
-🎉 Успешная сделка:
-• Символ: {symbol}
-• Стратегия: {strategy}
-• Order ID: {order_id}
-
-📊 Статистика восстановления:
-• Было блокировок: {total_blocks}
-• Подряд блокировок: {self.consecutive_blocks}
-• Время восстановления: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
-
-🎯 Система торгует нормально!
-"""
-
-        try:
-            self.telegram_bot.send_admin_message(message)
-            self.logger.info("📱 Уведомление о восстановлении отправлено")
-        except Exception as e:
-            self.logger.error(f"❌ Ошибка отправки уведомления о восстановлении: {e}")
-
-    def _check_escalation(self) -> None:
-        """Проверка необходимости эскалации"""
-        if self.consecutive_blocks >= self.critical_threshold:
-            self._send_critical_escalation()
-        elif self.consecutive_blocks >= self.escalation_threshold:
-            self._send_high_escalation()
-
-    def _send_critical_escalation(self) -> None:
-        """Критическая эскалация"""
-        if not self.telegram_bot:
-            return
-
-        message = f"""
-💀🚨💀 КРИТИЧЕСКАЯ ЭСКАЛАЦИЯ 💀🚨💀
-
-🚫 СИСТЕМА ПОЛНОСТЬЮ ЗАБЛОКИРОВАНА!
-
-⚠️ {self.consecutive_blocks} БЛОКИРОВОК ПОДРЯД!
-
-📊 Анализ блокировок:
-"""
-
-        for block_type, count in self.block_counters.items():
-            if count > 0:
-                message += f"• {block_type.value}: {count}\n"
-
-        message += f"""
-⏰ Последняя сделка: {self._format_last_trade()}
-
-🔧 ТРЕБУЕМЫЕ ДЕЙСТВИЯ:
-1. Проверить позиции на бирже
-2. Проверить баланс и лимиты
-3. Перезапустить систему при необходимости
-4. Связаться с администратором
-
-💀 ТОРГОВЛЯ ОСТАНОВЛЕНА!
-"""
-
-        try:
-            self.telegram_bot.send_admin_message(message)
-            self.logger.critical("💀 Критическая эскалация отправлена!")
-        except Exception as e:
-            self.logger.error(f"❌ Ошибка отправки критической эскалации: {e}")
-
-    def _send_high_escalation(self) -> None:
-        """Высокая эскалация"""
-        if not self.telegram_bot:
-            return
-
-        message = f"""
-🚨 ВЫСОКАЯ ЭСКАЛАЦИЯ
-
-⚠️ {self.consecutive_blocks} блокировок подряд!
-
-Система испытывает серьезные проблемы с торговлей.
-Рекомендуется проверить состояние и принять меры.
-
-📊 Топ блокировок:
-"""
-
-        sorted_blocks = sorted(self.block_counters.items(), key=lambda x: x[1], reverse=True)
-        for block_type, count in sorted_blocks[:3]:
-            if count > 0:
-                message += f"• {block_type.value}: {count}\n"
-
-        try:
-            self.telegram_bot.send_admin_message(message)
-            self.logger.error("🚨 Высокая эскалация отправлена!")
-        except Exception as e:
-            self.logger.error(f"❌ Ошибка отправки высокой эскалации: {e}")
-
-    def _format_last_trade(self) -> str:
-        """Форматирование времени последней сделки"""
-        if not self.last_successful_trade:
-            return "Нет данных"
-
-        now = datetime.now(timezone.utc)
-        diff = now - self.last_successful_trade
-
-        if diff.days > 0:
-            return f"{diff.days} дней назад"
-        elif diff.seconds > 3600:
-            return f"{diff.seconds // 3600} часов назад"
-        elif diff.seconds > 60:
-            return f"{diff.seconds // 60} минут назад"
-        else:
-            return "Менее минуты назад"
-
-    def _start_monitoring_thread(self) -> None:
-        """Запуск фонового мониторинга"""
-        def monitoring_loop():
-            while True:
-                try:
-                    time.sleep(1800)  # Каждые 30 минут
-                    self._periodic_health_check()
-                except Exception as e:
-                    self.logger.error(f"Ошибка в мониторинге: {e}")
-                    time.sleep(300)  # При ошибке ждем 5 минут
-
-        monitor_thread = threading.Thread(target=monitoring_loop, daemon=True)
-        monitor_thread.start()
-
-    def _periodic_health_check(self) -> None:
-        """Периодическая проверка здоровья системы"""
-        with self._lock:
-            now = datetime.now(timezone.utc)
-
-            # Если нет сделок долгое время - отправляем предупреждение
-            if self.last_successful_trade:
-                time_since_trade = now - self.last_successful_trade
-
-                if time_since_trade > timedelta(hours=2) and self.telegram_bot:
-                    total_blocks = sum(self.block_counters.values())
-
-                    if total_blocks > 0:
-                        message = f"""
-⏰ ПЕРИОДИЧЕСКИЙ ОТЧЕТ
-
-🚫 Торговля заблокирована уже {self._format_last_trade()}
-
-📊 Блокировки за период:
-"""
-                        for block_type, count in self.block_counters.items():
-                            if count > 0:
-                                message += f"• {block_type.value}: {count}\n"
-
-                        message += f"\n💡 Рекомендуется проверить систему"
-
-                        try:
-                            self.telegram_bot.send_admin_message(message)
-                        except Exception as e:
-                            self.logger.error(f"Ошибка периодического отчета: {e}")
-
-    def get_stats(self) -> Dict[str, Any]:
-        """Получение статистики блокировок"""
-        with self._lock:
-            return {
-                "total_blocks": sum(self.block_counters.values()),
-                "consecutive_blocks": self.consecutive_blocks,
-                "block_breakdown": dict(self.block_counters),
-                "last_successful_trade": self.last_successful_trade.isoformat() if self.last_successful_trade else None,
-                "recent_events": len([e for e in self.block_events if (datetime.now(timezone.utc) - e.timestamp).seconds < 3600])
-            }
-
-
-# Глобальный экземпляр
-_blocking_alerts_manager = None
-_manager_lock = threading.RLock()
-
+# Глобальный экземпляр менеджера
+_blocking_manager = None
 
 def get_blocking_alerts_manager(telegram_bot=None) -> BlockingAlertsManager:
-    """Получение синглтона менеджера оповещений"""
-    global _blocking_alerts_manager
+    """Получить глобальный менеджер блокировок"""
+    global _blocking_manager
+    if _blocking_manager is None:
+        _blocking_manager = BlockingAlertsManager(telegram_bot)
+    return _blocking_manager
 
-    if _blocking_alerts_manager is None:
-        with _manager_lock:
-            if _blocking_alerts_manager is None:
-                _blocking_alerts_manager = BlockingAlertsManager(telegram_bot)
-
-    return _blocking_alerts_manager
-
-
-def report_order_block(block_type: str, symbol: str, strategy: str, reason: str, details: Dict[str, Any] = None):
-    """Быстрая функция для сообщения о блокировке ордера"""
-    try:
-        block_enum = BlockType(block_type)
-    except ValueError:
-        block_enum = BlockType.UNKNOWN
-
+def report_order_block(reason: str, symbol: str, strategy: str,
+                      message: str, details: Dict[str, Any] = None) -> None:
+    """Упрощенная функция для сообщения о блокировке"""
     manager = get_blocking_alerts_manager()
-    manager.report_block(block_enum, symbol, strategy, reason, details)
-
-
-def report_successful_order(symbol: str, strategy: str, order_id: str):
-    """Быстрая функция для сообщения об успешном ордере"""
-    manager = get_blocking_alerts_manager()
-    manager.report_successful_trade(symbol, strategy, order_id)
+    manager.report_order_block(reason, symbol, strategy, message, details)

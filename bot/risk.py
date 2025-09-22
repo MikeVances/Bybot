@@ -102,16 +102,33 @@ class RiskManager:
             return limits
         return self.global_limits
     
-    def check_pre_trade_risk(self, strategy_name: str, signal: Dict, 
+    def check_pre_trade_risk(self, strategy_name: str, signal: Dict,
                            current_balance: float, api_client) -> Tuple[bool, str]:
         """Проверка рисков ПЕРЕД размещением ордера"""
-        
+
+        # Импорт системы уведомлений
+        from bot.core.blocking_alerts import report_order_block
+
         # 1. Проверка emergency stop
         if self.emergency_stop:
+            report_order_block(
+                reason="emergency_stop",
+                symbol=signal.get('symbol', 'UNKNOWN'),
+                strategy=strategy_name,
+                message="Активирован аварийный стоп системы",
+                details={"emergency_reason": "Risk manager emergency stop"}
+            )
             return False, "Активирован аварийный стоп"
-        
+
         # 2. Проверка заблокированных стратегий
         if strategy_name in self.blocked_strategies:
+            report_order_block(
+                reason="risk_limit",
+                symbol=signal.get('symbol', 'UNKNOWN'),
+                strategy=strategy_name,
+                message=f"Стратегия {strategy_name} заблокирована",
+                details={"blocked_strategies": list(self.blocked_strategies)}
+            )
             return False, f"Стратегия {strategy_name} заблокирована"
         
         # 3. Получаем лимиты для стратегии
@@ -122,6 +139,17 @@ class RiskManager:
         daily_trades_count = self.daily_trades.get(today, 0)
         
         if daily_trades_count >= limits.max_daily_trades:
+            report_order_block(
+                reason="risk_limit",
+                symbol=signal.get('symbol', 'UNKNOWN'),
+                strategy=strategy_name,
+                message=f"Превышен лимит дневных сделок ({limits.max_daily_trades})",
+                details={
+                    "daily_trades": daily_trades_count,
+                    "max_trades": limits.max_daily_trades,
+                    "time_to_reset": "00:00 UTC завтра"
+                }
+            )
             return False, f"Превышен лимит дневных сделок ({limits.max_daily_trades})"
         
         # 5. Проверка дневных потерь
@@ -129,6 +157,17 @@ class RiskManager:
         max_daily_loss = current_balance * limits.max_daily_loss_pct / 100
         
         if daily_loss >= max_daily_loss:
+            report_order_block(
+                reason="risk_limit",
+                symbol=signal.get('symbol', 'UNKNOWN'),
+                strategy=strategy_name,
+                message=f"Превышен лимит дневных потерь",
+                details={
+                    "daily_loss": daily_loss,
+                    "max_daily_loss": max_daily_loss,
+                    "current_balance": current_balance
+                }
+            )
             return False, f"Превышен лимит дневных потерь (${daily_loss:.2f} >= ${max_daily_loss:.2f})"
         
         # 6. Проверка количества открытых позиций
@@ -136,6 +175,16 @@ class RiskManager:
                                   if p.strategy == strategy_name])
         
         if open_positions_count >= limits.max_open_positions:
+            report_order_block(
+                reason="position_limit",
+                symbol=signal.get('symbol', 'UNKNOWN'),
+                strategy=strategy_name,
+                message=f"Превышен лимит открытых позиций ({limits.max_open_positions})",
+                details={
+                    "open_positions": open_positions_count,
+                    "max_positions": limits.max_open_positions
+                }
+            )
             return False, f"Превышен лимит открытых позиций ({limits.max_open_positions})"
         
         # 7. Проверка размера позиции
@@ -148,6 +197,18 @@ class RiskManager:
         max_position_value = current_balance * limits.max_position_size_pct / 100
         
         if position_value > max_position_value:
+            report_order_block(
+                reason="position_limit",
+                symbol=signal.get('symbol', 'UNKNOWN'),
+                strategy=strategy_name,
+                message=f"Размер позиции слишком большой",
+                details={
+                    "position_value": position_value,
+                    "max_position_value": max_position_value,
+                    "current_balance": current_balance,
+                    "position_size_pct": limits.max_position_size_pct
+                }
+            )
             return False, f"Размер позиции слишком большой (${position_value:.2f} > ${max_position_value:.2f})"
         
         # 8. Проверка Risk/Reward соотношения

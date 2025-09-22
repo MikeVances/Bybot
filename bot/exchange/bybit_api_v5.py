@@ -29,7 +29,7 @@ class BybitAPIV5:
     def __init__(self, api_key: str = None, api_secret: str = None, testnet: bool = False):
         """
         Инициализация Bybit API v5
-        
+
         Args:
             api_key: API ключ (если None, используется из config)
             api_secret: API секрет (если None, используется из config)
@@ -38,7 +38,7 @@ class BybitAPIV5:
         # Используем переданные ключи или дефолтные из config
         self.api_key = api_key or BYBIT_API_KEY
         self.api_secret = api_secret or BYBIT_API_SECRET
-        
+
         # Используем централизованную конфигурацию API
         from config import get_api_config
         api_config = get_api_config()
@@ -71,13 +71,25 @@ class BybitAPIV5:
             self.session.endpoint = self.base_url
             # Обязательно устанавливаем правильный базовый URL для demo сервера
             self.session.BASE_URL = self.base_url
-        
+
         # Настройка защищённого логирования (ленивая инициализация)
         self._logger = None
-        
+
         # Rate limiter будет инициализирован при первом использовании
         self._rate_limiter = None
-        
+
+        # 🔄 Enhanced Connection Manager с heartbeat мониторингом
+        self._connection_manager = None
+
+        # Настройка enhanced connection manager
+        from bot.core.enhanced_api_connection import setup_enhanced_connection_manager
+        self.connection_manager = setup_enhanced_connection_manager(
+            self.session,
+            backup_endpoints=[
+                "https://api.bytick.com",  # Backup endpoint если доступен
+            ]
+        )
+
         # Логируем инициализацию через стандартный logger
         import logging
         logging.getLogger('bybit_api_v5').info(f"🚀 Bybit API v5 инициализирован (testnet: {self.testnet}, URL: {self.base_url})")
@@ -329,13 +341,13 @@ class BybitAPIV5:
     
     def get_ohlcv(self, symbol: str = "BTCUSDT", interval: str = "1", limit: int = 100) -> Optional[pd.DataFrame]:
         """
-        Получение OHLCV данных (v5 API)
-        
+        Получение OHLCV данных (v5 API) с fallback поддержкой
+
         Args:
             symbol: Торговый инструмент
             interval: Интервал (1, 3, 5, 15, 30, 60, 120, 240, 360, 720, D, M, W)
             limit: Количество свечей
-            
+
         Returns:
             DataFrame с OHLCV данными
         """
@@ -344,43 +356,54 @@ class BybitAPIV5:
             if not self.rate_limiter.can_make_request("get_kline"):
                 self.logger.error("Rate limit exceeded for get_kline")
                 return None
+
             # Конвертируем интервал в формат Bybit
             interval_map = {
                 "1": "1", "3": "3", "5": "5", "15": "15", "30": "30",
                 "60": "60", "120": "120", "240": "240", "360": "360", "720": "720",
                 "D": "D", "M": "M", "W": "W"
             }
-            
+
             bybit_interval = interval_map.get(interval, interval)
-            
-            response = self.session.get_kline(
-                category="linear",
-                symbol=symbol,
-                interval=bybit_interval,
-                limit=limit
+
+            def _fetch_ohlcv():
+                return self.session.get_kline(
+                    category="linear",
+                    symbol=symbol,
+                    interval=bybit_interval,
+                    limit=limit
+                )
+
+            # Используем connection manager с fallback
+            cache_key = f"ohlcv_{symbol}_{interval}_{limit}"
+
+            response = self.connection_manager.execute_with_fallback(
+                operation=_fetch_ohlcv,
+                operation_name=f"get_ohlcv_{symbol}",
+                cache_key=cache_key
             )
-            
-            if response.get('retCode') == 0:
+
+            if response and response.get('retCode') == 0:
                 # Конвертируем в DataFrame
                 data = response['result']['list']
                 df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-                
+
                 # Конвертируем типы данных
                 for col in ['open', 'high', 'low', 'close', 'volume', 'turnover']:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
-                
+
                 # Конвертируем timestamp (исправляем FutureWarning)
                 df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms')
-                
+
                 # Сортируем по времени
                 df = df.sort_values('timestamp').reset_index(drop=True)
-                
+
                 self.logger.info(f"✅ OHLCV данные получены: {symbol} {interval} ({len(df)} свечей)")
                 return df
             else:
                 self.logger.error(f"❌ Ошибка получения OHLCV: {response}")
                 return None
-                
+
         except Exception as e:
             self.logger.error(f"❌ Ошибка получения OHLCV: {e}")
             return None
