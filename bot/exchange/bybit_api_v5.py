@@ -8,7 +8,7 @@ import os
 import logging
 import pandas as pd
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Callable
 import csv
 
 from pybit.unified_trading import HTTP
@@ -85,9 +85,8 @@ class BybitAPIV5:
         from bot.core.enhanced_api_connection import setup_enhanced_connection_manager
         self.connection_manager = setup_enhanced_connection_manager(
             self.session,
-            backup_endpoints=[
-                "https://api.bytick.com",  # Backup endpoint если доступен
-            ]
+            base_url=self.base_url,
+            backup_endpoints=None  # Используем только основной endpoint из конфигурации
         )
 
         # Логируем инициализацию через стандартный logger
@@ -120,6 +119,25 @@ class BybitAPIV5:
                 self._rate_limiter = MockRateLimiter()
         return self._rate_limiter
 
+    def _call_api(self, operation_name: str, func: Callable[[], Dict[str, Any]],
+                  *, cache_key: Optional[str] = None) -> Dict[str, Any]:
+        if self.connection_manager:
+            try:
+                return self.connection_manager.execute_with_fallback(
+                    operation=func,
+                    operation_name=operation_name,
+                    cache_key=cache_key
+                )
+            except Exception as exc:
+                self.logger.error(f"❌ {operation_name}: {exc}")
+                return {"retCode": -1, "retMsg": str(exc)}
+
+        try:
+            return func()
+        except Exception as exc:
+            self.logger.error(f"❌ {operation_name}: {exc}")
+            return {"retCode": -1, "retMsg": str(exc)}
+
     def get_wallet_balance_v5(self) -> Dict[str, Any]:
         """
         Получение баланса кошелька (v5 API)
@@ -132,7 +150,11 @@ class BybitAPIV5:
             if not self.rate_limiter.can_make_request("get_wallet_balance"):
                 return {"retCode": -1001, "retMsg": "Rate limit exceeded for get_wallet_balance"}
             
-            response = self.session.get_wallet_balance(accountType="UNIFIED")
+            response = self._call_api(
+                "get_wallet_balance",
+                lambda: self.session.get_wallet_balance(accountType="UNIFIED"),
+                cache_key="wallet_balance"
+            )
             self.logger.safe_log_api_response(
                 response, 
                 "Баланс получен успешно", 
@@ -236,9 +258,11 @@ class BybitAPIV5:
             # Безопасное логирование запроса
             self.logger.safe_log_order_request(symbol, side, order_type, qty, price)
             
-            # Создаем ордер через официальную библиотеку
-            response = self.session.place_order(**params)
-            
+            response = self._call_api(
+                "create_order",
+                lambda: self.session.place_order(**params)
+            )
+
             # Безопасное логирование ответа
             self.logger.safe_log_api_response(
                 response,
@@ -289,7 +313,10 @@ class BybitAPIV5:
                 params["tpTriggerBy"] = tp_trigger_by
                 self.logger.info(f"🎯 Устанавливаем TP: {take_profit}")
             
-            response = self.session.set_trading_stop(**params)
+            response = self._call_api(
+                "set_trading_stop",
+                lambda: self.session.set_trading_stop(**params)
+            )
             
             self.logger.safe_log_api_response(
                 response,
@@ -325,7 +352,11 @@ class BybitAPIV5:
             if symbol:
                 params["symbol"] = symbol
             
-            response = self.session.get_positions(**params)
+            response = self._call_api(
+                "get_positions",
+                lambda: self.session.get_positions(**params),
+                cache_key=f"positions_{symbol or 'ALL'}"
+            )
             
             self.logger.safe_log_api_response(
                 response,
@@ -422,9 +453,12 @@ class BybitAPIV5:
             # 🛡️ RATE LIMITING: Проверка перед критическим API вызовом
             if not self.rate_limiter.can_make_request("cancel_all_orders"):
                 return {"retCode": -1001, "retMsg": "Rate limit exceeded for cancel_all_orders"}
-            response = self.session.cancel_all_orders(
-                category="linear",
-                symbol=symbol
+            response = self._call_api(
+                "cancel_all_orders",
+                lambda: self.session.cancel_all_orders(
+                    category="linear",
+                    symbol=symbol
+                )
             )
             
             self.logger.safe_log_api_response(
@@ -461,7 +495,11 @@ class BybitAPIV5:
             if symbol:
                 params["symbol"] = symbol
             
-            response = self.session.get_open_orders(**params)
+            response = self._call_api(
+                "get_open_orders",
+                lambda: self.session.get_open_orders(**params),
+                cache_key=f"open_orders_{symbol or 'ALL'}"
+            )
             
             self.logger.safe_log_api_response(
                 response,
@@ -483,7 +521,11 @@ class BybitAPIV5:
             Время сервера
         """
         try:
-            response = self.session.get_server_time()
+            response = self._call_api(
+                "get_server_time",
+                lambda: self.session.get_server_time(),
+                cache_key="server_time"
+            )
             return response
         except Exception as e:
             self.logger.error(f"❌ Ошибка получения времени сервера: {e}")
@@ -508,7 +550,11 @@ class BybitAPIV5:
             if symbol:
                 params["symbol"] = symbol
                 
-            response = self.session.get_instruments_info(**params)
+            response = self._call_api(
+                "get_instruments_info",
+                lambda: self.session.get_instruments_info(**params),
+                cache_key=f"instruments_{category}_{symbol or 'ALL'}"
+            )
             
             if response and response.get('retCode') == 0:
                 self.logger.info(f"✅ Информация об инструментах получена: {len(response['result']['list'])} инструментов")

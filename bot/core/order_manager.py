@@ -7,11 +7,13 @@ ZERO TOLERANCE К ДУБЛИРОВАННЫМ ОРДЕРАМ!
 
 import threading
 import time
+import queue
 import logging
 from typing import Dict, Optional, Tuple, Any, List
 from datetime import datetime, timedelta
 from collections import defaultdict
 from dataclasses import dataclass
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 
 from bot.core.exceptions import OrderRejectionError, RateLimitError, PositionConflictError
 
@@ -36,6 +38,15 @@ class OrderRequest:
             self.timestamp = datetime.now()
 
 
+@dataclass
+class _OrderJob:
+    api: Any
+    request: OrderRequest
+    order_key: str
+    future: Future
+    submitted_at: datetime
+
+
 class ThreadSafeOrderManager:
     """
     🚨 КРИТИЧЕСКИЙ МЕНЕДЖЕР ОРДЕРОВ С ПОЛНОЙ СИНХРОНИЗАЦИЕЙ
@@ -48,7 +59,9 @@ class ThreadSafeOrderManager:
     - Полная thread-safety
     """
     
-    def __init__(self, max_orders_per_minute: int = 10):
+    def __init__(self, max_orders_per_minute: int = 10, *, worker_count: int = 2,
+                 queue_capacity: int = 128, order_timeout_seconds: float = 10.0,
+                 max_worker_retries: int = 3):
         # 🔒 ОСНОВНЫЕ БЛОКИРОВКИ
         self._global_lock = threading.RLock()
         self._symbol_locks: Dict[str, threading.RLock] = {}
@@ -77,8 +90,48 @@ class ThreadSafeOrderManager:
             'duplicate_blocks': 0,
             'rate_limit_blocks': 0
         }
-        
+
         self.logger.info("🛡️ ThreadSafeOrderManager инициализирован с максимальной защитой")
+
+        # ⚙️ ПАРАМЕТРЫ ОЧЕРЕДИ И ВОРКЕРОВ
+        self._order_timeout_seconds = order_timeout_seconds
+        self._max_worker_retries = max(1, max_worker_retries)
+        self._worker_retry_base_delay = 0.5
+        self._worker_retry_backoff_cap = 5.0
+
+        self._order_queue: "queue.Queue[_OrderJob]" = queue.Queue(maxsize=queue_capacity)
+        self._worker_stop_event = threading.Event()
+        self._workers: List[threading.Thread] = []
+
+        worker_count = max(1, worker_count)
+        for idx in range(worker_count):
+            worker = threading.Thread(
+                target=self._order_worker,
+                name=f"order-worker-{idx+1}",
+                daemon=True
+            )
+            worker.start()
+            self._workers.append(worker)
+        self.logger.info(f"🧵 Запущено {len(self._workers)} order worker(ов)")
+
+    def shutdown(self, timeout: float = 1.0) -> None:
+        """Остановка воркеров и освобождение ресурсов."""
+        if self._worker_stop_event.is_set():
+            return
+
+        self._worker_stop_event.set()
+        # Разблокируем воркеры
+        for _ in self._workers:
+            try:
+                self._order_queue.put_nowait(None)  # type: ignore[arg-type]
+            except queue.Full:
+                self._order_queue.put(None)  # type: ignore[arg-type]
+
+        for worker in self._workers:
+            worker.join(timeout=timeout)
+
+        self._workers.clear()
+        self.logger.info("🛑 OrderManager воркеры остановлены")
     
     def get_symbol_lock(self, symbol: str) -> threading.RLock:
         """Получение или создание блокировки для символа"""
@@ -184,56 +237,145 @@ class ThreadSafeOrderManager:
         return True, "OK"
     
     def create_order_safe(self, api, request: OrderRequest) -> Optional[Dict[str, Any]]:
-        """
-        🛡️ БЕЗОПАСНОЕ СОЗДАНИЕ ОРДЕРА С ПОЛНОЙ СИНХРОНИЗАЦИЕЙ
-        
-        Args:
-            api: API объект для создания ордера
-            request: Запрос на создание ордера
-            
-        Returns:
-            Результат создания ордера или None при отклонении
-            
-        Raises:
-            OrderRejectionError: При отклонении ордера
-            RateLimitError: При превышении лимитов
-            PositionConflictError: При конфликте позиций
-        """
+        """🛡️ Безопасное создание ордера с вынесенным сетевым вызовом."""
+
         symbol = request.symbol
-        
-        # 🔒 БЛОКИРУЕМ СИМВОЛ
+        order_key = f"{request.side}_{request.order_type}_{request.qty}_{request.price}_{request.strategy_name}"
+
+        # 🔒 Внутри блокировки выполняем быстрые проверки и регистрируем pending ордер
         with self.get_symbol_lock(symbol):
+            self.logger.info(
+                f"🔍 Подготовка ордера {request.strategy_name}: {request.side} {request.qty} {symbol}"
+            )
+
+            if self._emergency_stop:
+                raise OrderRejectionError("🚨 АВАРИЙНАЯ ОСТАНОВКА: Все ордера заблокированы")
+
+            rate_ok, rate_msg = self._check_rate_limit(symbol)
+            if not rate_ok:
+                raise RateLimitError(f"Rate limit для {symbol}: {rate_msg}")
+
+            dup_ok, dup_msg = self._check_duplicate_order(symbol, request)
+            if not dup_ok:
+                raise OrderRejectionError(f"Дублированный ордер для {symbol}: {dup_msg}")
+
+            pos_ok, pos_msg = self._check_position_conflict(symbol, request, api)
+            if not pos_ok:
+                raise PositionConflictError(f"Конфликт позиции для {symbol}: {pos_msg}")
+
+            self._pending_orders[symbol][order_key] = {
+                'request': request,
+                'created_at': datetime.now()
+            }
+
             try:
-                self.logger.info(f"🔍 Обработка ордера {request.strategy_name}: {request.side} {request.qty} {symbol}")
-                
-                # 1. 🚨 ПРОВЕРКА АВАРИЙНОЙ ОСТАНОВКИ
-                if self._emergency_stop:
-                    raise OrderRejectionError("🚨 АВАРИЙНАЯ ОСТАНОВКА: Все ордера заблокированы")
-                
-                # 2. ⏰ ПРОВЕРКА RATE LIMIT
-                rate_ok, rate_msg = self._check_rate_limit(symbol)
-                if not rate_ok:
-                    raise RateLimitError(f"Rate limit для {symbol}: {rate_msg}")
-                
-                # 3. 🔄 ПРОВЕРКА ДУБЛИКАТОВ
-                dup_ok, dup_msg = self._check_duplicate_order(symbol, request)
-                if not dup_ok:
-                    raise OrderRejectionError(f"Дублированный ордер для {symbol}: {dup_msg}")
-                
-                # 4. 📈 ПРОВЕРКА КОНФЛИКТОВ ПОЗИЦИЙ
-                pos_ok, pos_msg = self._check_position_conflict(symbol, request, api)
-                if not pos_ok:
-                    raise PositionConflictError(f"Конфликт позиции для {symbol}: {pos_msg}")
-                
-                # 5. 📝 РЕГИСТРАЦИЯ PENDING ОРДЕРА
-                order_key = f"{request.side}_{request.order_type}_{request.qty}_{request.price}_{request.strategy_name}"
-                self._pending_orders[symbol][order_key] = {
-                    'request': request,
-                    'created_at': datetime.now()
-                }
-                
-                # 6. 🎯 СОЗДАНИЕ ОРДЕРА
-                order_response = api.create_order(
+                future = self._submit_order_job(api, request, order_key)
+            except Exception:
+                # Очистка pending при ошибке постановки в очередь
+                self._remove_pending_order(symbol, order_key)
+                raise
+
+        # ⏱️ Ждём результат от воркера вне блокировки символа
+        try:
+            order_response = future.result(timeout=self._order_timeout_seconds)
+        except FutureTimeoutError:
+            self._stats['rejected_orders'] += 1
+            self._remove_pending_order(symbol, order_key)
+            self.logger.error(
+                f"⏱️ Таймаут исполнения ордера для {symbol}: {request.side} {request.qty}"
+            )
+            raise OrderRejectionError(f"Таймаут отправки ордера {symbol}")
+        except (OrderRejectionError, RateLimitError, PositionConflictError) as e:
+            self._stats['rejected_orders'] += 1
+            self._remove_pending_order(symbol, order_key)
+            raise e
+        except Exception as e:
+            self._stats['rejected_orders'] += 1
+            self._remove_pending_order(symbol, order_key)
+            self.logger.error(f"💥 Неожиданная ошибка воркера ордеров {symbol}: {e}")
+            raise OrderRejectionError(f"Неожиданная ошибка для {symbol}: {str(e)}") from e
+
+        if not order_response:
+            self._stats['rejected_orders'] += 1
+            self._remove_pending_order(symbol, order_key)
+            raise OrderRejectionError(f"Не получен ответ API для {symbol}")
+
+        if order_response.get('retCode') != 0:
+            self._stats['rejected_orders'] += 1
+            error_msg = order_response.get('retMsg', 'Unknown error')
+            self._remove_pending_order(symbol, order_key)
+            raise OrderRejectionError(f"API отклонил ордер для {symbol}: {error_msg}")
+
+        # ✅ Успешный ордер
+        now = datetime.now()
+        self._order_timestamps[symbol].append(now)
+        self._last_order_time[symbol] = now
+        self._stats['total_orders'] += 1
+        self._remove_pending_order(symbol, order_key)
+
+        self.logger.info(
+            f"✅ Ордер успешно создан для {symbol}: "
+            f"{order_response.get('result', {}).get('orderId', 'N/A')}"
+        )
+        return order_response
+    
+    def get_position_state(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Получение актуального состояния позиции"""
+        with self.get_symbol_lock(symbol):
+            return self._active_positions.get(symbol, None)
+
+    def _submit_order_job(self, api, request: OrderRequest, order_key: str) -> Future:
+        future: Future = Future()
+        job = _OrderJob(
+            api=api,
+            request=request,
+            order_key=order_key,
+            future=future,
+            submitted_at=datetime.now()
+        )
+
+        try:
+            self._order_queue.put(job, timeout=1.0)
+            self.logger.debug(
+                f"🧵 Ордер отправлен в очередь: {request.strategy_name} {request.side} {request.qty} {request.symbol}"
+            )
+        except queue.Full:
+            future.set_exception(OrderRejectionError("Очередь ордеров переполнена"))
+            self.logger.error("🚫 Очередь ордеров переполнена — новый ордер отклонён")
+            raise OrderRejectionError("Очередь ордеров переполнена")
+
+        return future
+
+    def _remove_pending_order(self, symbol: str, order_key: str) -> None:
+        with self._global_lock:
+            if symbol in self._pending_orders and order_key in self._pending_orders[symbol]:
+                del self._pending_orders[symbol][order_key]
+                if not self._pending_orders[symbol]:
+                    del self._pending_orders[symbol]
+
+    def _order_worker(self) -> None:
+        while not self._worker_stop_event.is_set():
+            try:
+                job = self._order_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+
+            if job is None:  # type: ignore[truthy-function]
+                self._order_queue.task_done()
+                break
+
+            try:
+                self._process_order_job(job)
+            finally:
+                self._order_queue.task_done()
+
+    def _process_order_job(self, job: _OrderJob) -> None:
+        request = job.request
+        symbol = request.symbol
+
+        for attempt in range(self._max_worker_retries):
+            try:
+                response = job.api.create_order(
                     symbol=request.symbol,
                     side=request.side,
                     order_type=request.order_type,
@@ -244,53 +386,60 @@ class ThreadSafeOrderManager:
                     reduce_only=request.reduce_only,
                     position_idx=request.position_idx
                 )
-                
-                # 7. ✅ ОБРАБОТКА РЕЗУЛЬТАТА
-                if order_response and order_response.get('retCode') == 0:
-                    # Успешно создан
-                    now = datetime.now()
-                    self._order_timestamps[symbol].append(now)
-                    self._last_order_time[symbol] = now
-                    self._stats['total_orders'] += 1
-                    
-                    # Очищаем pending ордер
-                    if order_key in self._pending_orders[symbol]:
-                        del self._pending_orders[symbol][order_key]
-                    
-                    self.logger.info(f"✅ Ордер успешно создан для {symbol}: {order_response.get('result', {}).get('orderId', 'N/A')}")
-                    return order_response
-                    
-                else:
-                    # Ошибка создания
-                    error_msg = order_response.get('retMsg', 'Unknown error') if order_response else 'No response'
-                    self._stats['rejected_orders'] += 1
-                    
-                    # Очищаем pending ордер
-                    if order_key in self._pending_orders[symbol]:
-                        del self._pending_orders[symbol][order_key]
-                    
-                    raise OrderRejectionError(f"API отклонил ордер для {symbol}: {error_msg}")
-                
-            except (OrderRejectionError, RateLimitError, PositionConflictError):
-                # Перебрасываем наши исключения
-                raise
-                
-            except Exception as e:
-                # Неожиданная ошибка
-                self._stats['rejected_orders'] += 1
-                self.logger.error(f"💥 Неожиданная ошибка при создании ордера {symbol}: {e}")
-                
-                # Очищаем pending ордер при ошибке
-                order_key = f"{request.side}_{request.order_type}_{request.qty}_{request.price}_{request.strategy_name}"
-                if symbol in self._pending_orders and order_key in self._pending_orders[symbol]:
-                    del self._pending_orders[symbol][order_key]
-                
-                raise OrderRejectionError(f"Неожиданная ошибка для {symbol}: {str(e)}")
-    
-    def get_position_state(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Получение актуального состояния позиции"""
-        with self.get_symbol_lock(symbol):
-            return self._active_positions.get(symbol, None)
+
+                if response and response.get('retCode') == 0:
+                    if not job.future.done():
+                        job.future.set_result(response)
+                    return
+
+                error_msg = response.get('retMsg', 'Unknown error') if response else 'No response'
+                self.logger.warning(
+                    f"⚠️ API вернул ошибку при создании ордера {symbol}: {error_msg} (попытка {attempt + 1})"
+                )
+
+                should_retry = self._should_retry_response(response)
+                if should_retry and attempt < self._max_worker_retries - 1:
+                    delay = self._compute_retry_delay(attempt)
+                    self.logger.debug(
+                        f"🔁 Повторная попытка ордера {symbol} через {delay:.2f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+
+                if not job.future.done():
+                    job.future.set_exception(OrderRejectionError(f"API отклонил ордер: {error_msg}"))
+                return
+
+            except Exception as exc:
+                self.logger.warning(
+                    f"⚠️ Ошибка сети/воркера при создании ордера {symbol}: {exc} (попытка {attempt + 1})"
+                )
+                if attempt < self._max_worker_retries - 1:
+                    delay = self._compute_retry_delay(attempt)
+                    self.logger.debug(
+                        f"🔁 Повторная попытка после ошибки для {symbol} через {delay:.2f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+
+                if not job.future.done():
+                    job.future.set_exception(exc)
+                return
+
+        if not job.future.done():
+            job.future.set_exception(OrderRejectionError("Не удалось создать ордер: исчерпаны попытки"))
+
+    def _compute_retry_delay(self, attempt: int) -> float:
+        delay = self._worker_retry_base_delay * (2 ** attempt)
+        return min(delay, self._worker_retry_backoff_cap)
+
+    @staticmethod
+    def _should_retry_response(response: Optional[Dict[str, Any]]) -> bool:
+        if not response:
+            return True
+        ret_code = response.get('retCode')
+        # Повторяем при временных ошибках (rate limit, network)
+        return ret_code in {-1001, -1002, -1020}
     
     def get_stats(self) -> Dict[str, Any]:
         """Получение статистики работы менеджера"""
@@ -344,6 +493,11 @@ def reset_order_manager():
     """Сброс менеджера ордеров (для тестов)"""
     global _order_manager_instance
     with _order_manager_lock:
+        if _order_manager_instance is not None:
+            try:
+                _order_manager_instance.shutdown()
+            except Exception:
+                pass
         _order_manager_instance = None
 
 

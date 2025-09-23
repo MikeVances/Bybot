@@ -11,6 +11,7 @@ import threading
 import logging
 from dataclasses import dataclass
 from enum import Enum
+import re
 
 class ConnectionState(Enum):
     """Состояния подключения"""
@@ -33,14 +34,14 @@ class APIEndpoint:
 class EnhancedAPIConnectionManager:
     """Менеджер улучшенного подключения к API"""
 
-    def __init__(self, primary_session, backup_endpoints: List[str] = None):
+    def __init__(self, primary_session, base_url: Optional[str] = None, backup_endpoints: List[str] = None):
         self.primary_session = primary_session
         self.logger = logging.getLogger('api_connection')
+        self._lock = threading.RLock()
 
         # Настройка endpoints
-        self.endpoints = [
-            APIEndpoint("https://api.bybit.com", 1),  # Primary
-        ]
+        primary_url = base_url or getattr(primary_session, 'BASE_URL', None) or getattr(primary_session, 'endpoint', None) or "https://api.bybit.com"
+        self.endpoints = [APIEndpoint(primary_url, 1)]
 
         if backup_endpoints:
             for i, url in enumerate(backup_endpoints, 2):
@@ -68,6 +69,7 @@ class EnhancedAPIConnectionManager:
             'heartbeat_failures': 0
         }
 
+        self._apply_current_endpoint()
         self.start_heartbeat_monitoring()
 
     def start_heartbeat_monitoring(self):
@@ -80,6 +82,17 @@ class EnhancedAPIConnectionManager:
             )
             self.heartbeat_thread.start()
             self.logger.info("💓 Heartbeat мониторинг запущен")
+
+    def _apply_current_endpoint(self) -> None:
+        """Применяет текущий endpoint к сессии pybit."""
+        endpoint = self.endpoints[self.current_endpoint_index]
+        try:
+            self.primary_session.endpoint = endpoint.url
+            if hasattr(self.primary_session, 'BASE_URL'):
+                self.primary_session.BASE_URL = endpoint.url
+            self.logger.debug(f"🌐 Активный endpoint: {endpoint.url}")
+        except Exception as exc:
+            self.logger.warning(f"⚠️ Не удалось применить endpoint {endpoint.url}: {exc}")
 
     def _heartbeat_worker(self):
         """Рабочий поток heartbeat проверок"""
@@ -160,12 +173,34 @@ class EnhancedAPIConnectionManager:
                         )
 
                         self._update_connection_state(ConnectionState.DEGRADED)
+                        self._apply_current_endpoint()
                         return
 
             # Все endpoints недоступны
             self._update_connection_state(ConnectionState.FAILED)
         else:
             self._update_connection_state(ConnectionState.FAILED)
+
+    def _register_success(self, response_time: Optional[float] = None) -> None:
+        endpoint = self.endpoints[self.current_endpoint_index]
+        endpoint.last_success = datetime.now()
+        endpoint.consecutive_failures = 0
+        if response_time is not None:
+            endpoint.avg_response_time = (
+                endpoint.avg_response_time * 0.7 + response_time * 0.3
+            ) if endpoint.avg_response_time else response_time
+        if self.connection_state != ConnectionState.HEALTHY:
+            self._update_connection_state(ConnectionState.HEALTHY)
+
+    def _register_failure(self, error: Any) -> None:
+        endpoint = self.endpoints[self.current_endpoint_index]
+        endpoint.consecutive_failures += 1
+        self.connection_stats['failed_requests'] += 1
+
+        if endpoint.consecutive_failures >= 3:
+            self._switch_to_backup_endpoint()
+        else:
+            self._update_connection_state(ConnectionState.UNSTABLE)
 
     def _update_connection_state(self, new_state: ConnectionState):
         """Обновление состояния подключения"""
@@ -220,59 +255,69 @@ class EnhancedAPIConnectionManager:
             pass
 
     def execute_with_fallback(self, operation: Callable, operation_name: str,
-                            cache_key: str = None, **kwargs) -> Any:
-        """
-        Выполнение операции с fallback на кэшированные данные
+                              cache_key: str = None, *, max_attempts: int = 4,
+                              backoff_base: float = 0.5, backoff_cap: float = 5.0,
+                              use_cache: bool = True, **kwargs) -> Any:
+        """Выполнение операции с устойчивостью и fallback на кэш."""
 
-        Args:
-            operation: Функция для выполнения
-            operation_name: Название операции для логирования
-            cache_key: Ключ для кэширования результата
-            **kwargs: Аргументы для функции
-        """
         self.connection_stats['total_requests'] += 1
+        self.cleanup_expired_cache()
 
-        try:
-            # Проверяем состояние подключения
-            if self.connection_state == ConnectionState.FAILED:
-                if cache_key and cache_key in self.cached_data:
-                    self.logger.warning(f"🗂️ Используем кэшированные данные для {operation_name}")
-                    self.connection_stats['cache_hits'] += 1
-                    return self.cached_data[cache_key]['data']
-                else:
-                    raise Exception("API недоступен и нет кэшированных данных")
+        last_exception: Optional[Exception] = None
 
-            # Выполняем операцию
-            result = operation(**kwargs)
+        for attempt in range(1, max_attempts + 1):
+            self._apply_current_endpoint()
+            start_time = time.time()
+            try:
+                result = operation(**kwargs)
+                duration = time.time() - start_time
 
-            # Кэшируем результат если нужно
-            if cache_key and result:
-                self.cached_data[cache_key] = {
-                    'data': result,
-                    'timestamp': datetime.now()
-                }
+                if self._is_success_response(result):
+                    self._register_success(response_time=duration)
+                    if cache_key and result:
+                        self._store_cache(cache_key, result)
+                    return result
 
-            return result
-
-        except Exception as e:
-            self.connection_stats['failed_requests'] += 1
-            self.logger.error(f"API операция {operation_name} не удалась: {e}")
-
-            # Пробуем кэшированные данные
-            if cache_key and cache_key in self.cached_data:
-                cached_item = self.cached_data[cache_key]
-                data_age = datetime.now() - cached_item['timestamp']
-
-                if data_age < self.cache_ttl:
+                if self._should_retry_response(result) and attempt < max_attempts:
                     self.logger.warning(
-                        f"🗂️ Fallback на кэшированные данные для {operation_name} "
-                        f"(возраст: {data_age.total_seconds():.0f}s)"
+                        f"⚠️ {operation_name}: временная ошибка ({result.get('retMsg', 'unknown')}). "
+                        f"Попытка {attempt}/{max_attempts}"
                     )
-                    self.connection_stats['cache_hits'] += 1
-                    return cached_item['data']
+                    self._register_failure(result)
+                    delay = min(backoff_base * (2 ** (attempt - 1)), backoff_cap)
+                    time.sleep(delay)
+                    continue
 
-            # Нет fallback данных
-            raise e
+                if cache_key and result:
+                    self._store_cache(cache_key, result)
+                return result
+
+            except Exception as exc:
+                last_exception = exc
+                is_transient = self._is_transient_exception(exc)
+                self.logger.warning(
+                    f"⚠️ {operation_name}: исключение {exc} (попытка {attempt}/{max_attempts})"
+                )
+                self._register_failure(exc)
+
+                if not is_transient or attempt == max_attempts:
+                    break
+
+                delay = min(backoff_base * (2 ** (attempt - 1)), backoff_cap)
+                time.sleep(delay)
+                continue
+
+        if cache_key and use_cache and self._has_valid_cache(cache_key):
+            self.connection_stats['cache_hits'] += 1
+            cached_value = self.cached_data[cache_key]['value']
+            self.logger.warning(
+                f"🗂️ {operation_name}: используем кэшированные данные из-за проблем соединения"
+            )
+            return cached_value
+
+        if last_exception:
+            raise last_exception
+        raise RuntimeError(f"{operation_name} failed without exception but no response returned")
 
     def cleanup_expired_cache(self):
         """Очистка устаревшего кэша"""
@@ -288,19 +333,73 @@ class EnhancedAPIConnectionManager:
         if expired_keys:
             self.logger.debug(f"🧹 Очищено {len(expired_keys)} устаревших кэш записей")
 
+    def _has_valid_cache(self, cache_key: str) -> bool:
+        item = self.cached_data.get(cache_key)
+        if not item:
+            return False
+        if datetime.now() - item['timestamp'] > self.cache_ttl:
+            del self.cached_data[cache_key]
+            return False
+        return True
+
+    def _store_cache(self, cache_key: Optional[str], value: Any) -> None:
+        if not cache_key or value is None:
+            return
+        self.cached_data[cache_key] = {
+            'timestamp': datetime.now(),
+            'value': value
+        }
+
+    @staticmethod
+    def _is_success_response(response: Any) -> bool:
+        return isinstance(response, dict) and response.get('retCode') == 0
+
+    @staticmethod
+    def _should_retry_response(response: Optional[Dict[str, Any]]) -> bool:
+        if response is None:
+            return True
+        ret_code = response.get('retCode')
+        if ret_code in {-1001, -1002, -1020, -1022, -20001}:
+            return True
+        if ret_code == -1 and 'retMsg' in response:
+            msg = response['retMsg']
+            transient_markers = (
+                'Max retries exceeded',
+                'NameResolutionError',
+                'Connection aborted',
+                'Connection refused',
+                'Connection timed out',
+            )
+            return any(marker in msg for marker in transient_markers)
+        return False
+
+    @staticmethod
+    def _is_transient_exception(exc: Exception) -> bool:
+        transient_patterns = (
+            'NameResolutionError',
+            'Max retries exceeded',
+            'Connection aborted',
+            'Failed to resolve',
+            'Temporary failure in name resolution',
+            'Timeout',
+        )
+        message = str(exc)
+        return any(pattern in message for pattern in transient_patterns)
+
     def get_connection_health(self) -> Dict[str, Any]:
         """Получить информацию о здоровье подключения"""
-        current_endpoint = self.endpoints[self.current_endpoint_index]
+        with self._lock:
+            current_endpoint = self.endpoints[self.current_endpoint_index]
 
-        return {
-            'state': self.connection_state.value,
-            'current_endpoint': current_endpoint.url,
-            'endpoint_response_time': current_endpoint.avg_response_time,
-            'consecutive_failures': current_endpoint.consecutive_failures,
-            'last_success': current_endpoint.last_success.isoformat() if current_endpoint.last_success else None,
-            'cached_items': len(self.cached_data),
-            'stats': self.connection_stats.copy()
-        }
+            return {
+                'state': self.connection_state.value,
+                'current_endpoint': current_endpoint.url,
+                'endpoint_response_time': current_endpoint.avg_response_time,
+                'consecutive_failures': current_endpoint.consecutive_failures,
+                'last_success': current_endpoint.last_success.isoformat() if current_endpoint.last_success else None,
+                'cached_items': len(self.cached_data),
+                'stats': self.connection_stats.copy()
+            }
 
     def stop(self):
         """Остановка мониторинга"""
@@ -317,8 +416,8 @@ def get_enhanced_connection_manager() -> Optional[EnhancedAPIConnectionManager]:
     global _connection_manager
     return _connection_manager
 
-def setup_enhanced_connection_manager(primary_session, backup_endpoints=None):
+def setup_enhanced_connection_manager(primary_session, base_url: Optional[str] = None, backup_endpoints=None):
     """Настройка менеджера подключений"""
     global _connection_manager
-    _connection_manager = EnhancedAPIConnectionManager(primary_session, backup_endpoints)
+    _connection_manager = EnhancedAPIConnectionManager(primary_session, base_url=base_url, backup_endpoints=backup_endpoints)
     return _connection_manager
