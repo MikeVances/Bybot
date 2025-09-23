@@ -524,7 +524,6 @@ def main():
                 logger.info('✅ Telegram бот инициализирован')
                 
                 # Запускаем Telegram бота в отдельном потоке с собственным event loop
-                import threading
                 import asyncio
 
                 def run_telegram_bot():
@@ -624,9 +623,6 @@ def main():
         logger.info('='*60)
 
 
-# Запускаем main() всегда, независимо от того, как импортирован модуль
+# Запускаем только при прямом запуске скрипта
 if __name__ == "__main__":
-    main()
-else:
-    # Если импортирован как модуль, все равно запускаем
     main()

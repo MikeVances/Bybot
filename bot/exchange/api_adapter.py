@@ -127,9 +127,10 @@ class TradingBotAdapter:
         """Выполнение стратегии"""
         return self.bot.execute_strategy(risk_percent)
     
-    def get_ohlcv(self, interval: str = "1", limit: int = 100):
+    def get_ohlcv(self, symbol: Optional[str] = None, interval: str = "1", limit: int = 100):
         """Получение OHLCV данных"""
-        return self.bot.get_ohlcv(self.symbol, interval, limit)
+        target_symbol = symbol or self.symbol
+        return self.bot.get_ohlcv(target_symbol, interval, limit)
 
     def get_wallet_balance_v5(self) -> Dict[str, Any]:
         """Получение баланса кошелька"""
@@ -143,12 +144,80 @@ class TradingBotAdapter:
         """Получение позиций"""
         return self.bot.get_positions(symbol or self.symbol)
 
+    def create_order(self, symbol: str, side: str, order_type: str, qty: float,
+                     price: Optional[float] = None, stop_loss: Optional[float] = None,
+                     take_profit: Optional[float] = None, reduce_only: bool = False,
+                     position_idx: Optional[int] = None) -> Dict[str, Any]:
+        """Создание ордера через TradingBot v5"""
+        return self.bot.create_order(
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            qty=qty,
+            price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            reduce_only=reduce_only,
+            position_idx=position_idx
+        )
+
+    def set_trading_stop(self, symbol: str, stop_loss: Optional[float] = None,
+                         take_profit: Optional[float] = None,
+                         sl_trigger_by: str = "MarkPrice",
+                         tp_trigger_by: str = "MarkPrice") -> Dict[str, Any]:
+        """Установка стоп-параметров для открытой позиции"""
+        return self.bot.set_trading_stop(
+            symbol=symbol,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            sl_trigger_by=sl_trigger_by,
+            tp_trigger_by=tp_trigger_by
+        )
+
+    def cancel_all_orders(self, symbol: str) -> Dict[str, Any]:
+        """Отмена всех активных ордеров для символа"""
+        return self.bot.cancel_all_orders(symbol)
+
+    def get_open_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Получение списка открытых ордеров"""
+        target_symbol = symbol or self.symbol
+        return self.bot.get_open_orders(target_symbol)
+
+    def get_server_time(self) -> Dict[str, Any]:
+        """Получение времени сервера биржи"""
+        return self.bot.get_server_time()
+
+    def log_trade(self, symbol: str, side: str, qty: float, entry_price: float,
+                  exit_price: float, pnl: float, stop_loss: Optional[float] = None,
+                  take_profit: Optional[float] = None, strategy: str = "",
+                  comment: str = "") -> None:
+        """Логирование сделки для аналитики"""
+        return self.bot.log_trade(
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            pnl=pnl,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            strategy=strategy,
+            comment=comment
+        )
+
     def log_strategy_signal(self, strategy: str, symbol: str, signal: str,
                            market_data: Dict[str, Any], indicators: Dict[str, Any],
                            comment: str = "") -> None:
         """Логирование сигнала стратегии"""
         return self.bot.log_strategy_signal(strategy, symbol, signal,
                                          market_data, indicators, comment)
+
+    def __getattr__(self, item: str) -> Any:
+        """Прозрачно проксируем отсутствующие атрибуты в TradingBot v5"""
+        try:
+            return getattr(self.bot, item)
+        except AttributeError as exc:
+            raise AttributeError(f"{self.__class__.__name__} object has no attribute '{item}'") from exc
 
 
 # Фабричные функции для создания адаптеров

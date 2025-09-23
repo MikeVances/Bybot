@@ -420,54 +420,55 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
         strategy_apis = {}
         strategy_states = {}
         strategy_loggers = {}
+        strategy_configs = {}
         
         strategy_names = get_active_strategies()
         main_logger.info(f"📋 Найдено {len(strategy_names)} активных стратегий")
 
+        # Подготавливаем конфигурации
+        for strategy_name in strategy_names:
+            try:
+                strategy_configs[strategy_name] = get_strategy_config(strategy_name)
+            except Exception as cfg_error:
+                main_logger.error(f"❌ Ошибка чтения конфигурации {strategy_name}: {cfg_error}")
+
         # 🚨 ИНИЦИАЛИЗАЦИЯ EMERGENCY STOP СИСТЕМЫ
         main_logger.info("🚨 Инициализация системы экстренной остановки...")
 
-        # Создаем API клиенты сначала для emergency stop
-        temp_apis = {}
-        for strategy_name in strategy_names:
+        for strategy_name, config in strategy_configs.items():
             try:
-                config = get_strategy_config(strategy_name)
-                temp_apis[strategy_name] = create_trading_bot_adapter(
+                if not config.get('enabled', True):
+                    main_logger.info(f"⏸️ Стратегия {strategy_name} отключена в конфигурации")
+                    continue
+
+                adapter = create_trading_bot_adapter(
                     symbol=SYMBOL,
                     api_key=config['api_key'],
                     api_secret=config['api_secret'],
                     uid=config.get('uid'),
                     testnet=USE_TESTNET
                 )
-                main_logger.info(f"✅ API для {strategy_name} создан для emergency stop")
-            except Exception as e:
-                main_logger.error(f"❌ Ошибка создания API для {strategy_name}: {e}")
+                strategy_apis[strategy_name] = adapter
+                main_logger.info(f"✅ API клиент подготовлен для {strategy_name}")
+            except Exception as api_error:
+                main_logger.error(f"❌ Ошибка создания API для {strategy_name}: {api_error}")
 
         # Запускаем мониторинг emergency stop
-        global_emergency_stop.start_monitoring(temp_apis)
-        main_logger.info("🚨 Система экстренной остановки запущена")
+        if strategy_apis:
+            global_emergency_stop.start_monitoring(strategy_apis)
+            main_logger.info("🚨 Система экстренной остановки запущена")
+        else:
+            main_logger.error("❌ Не удалось подготовить API клиенты для стратегий")
+            return
 
         # 🔌 ЗАПУСК CIRCUIT BREAKER
         global_circuit_breaker.start_monitoring()
         main_logger.info("🔌 Circuit Breaker запущен")
         
         # Инициализация стратегий
-        for strategy_name in strategy_names:
+        for strategy_name, adapter in strategy_apis.items():
             try:
-                config = get_strategy_config(strategy_name)
-                
-                # Проверяем, включена ли стратегия
-                if not config.get('enabled', True):
-                    main_logger.info(f"⏸️ Стратегия {strategy_name} отключена в конфигурации")
-                    continue
-                
-                strategy_apis[strategy_name] = create_trading_bot_adapter(
-                    symbol=SYMBOL,
-                    api_key=config['api_key'],
-                    api_secret=config['api_secret'],
-                    uid=config.get('uid'),
-                    testnet=USE_TESTNET
-                )
+                config = strategy_configs[strategy_name]
                 strategy_states[strategy_name] = BotState()
                 strategy_loggers[strategy_name] = setup_strategy_logger(strategy_name)
                 

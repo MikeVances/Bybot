@@ -44,6 +44,7 @@ class TelegramBot:
         self._register_handlers()
         self._is_running = False
         self._bot_thread = None
+        self._loop = None
     
     def _escape_markdown(self, text: str) -> str:
         """Экранирование специальных символов для MarkdownV2"""
@@ -1957,55 +1958,35 @@ class TelegramBot:
         """Отправка сообщения администратору"""
         try:
             import asyncio
-            import threading
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-            # Получаем chat_id из конфигурации или используем дефолтный
             admin_chat_id = ADMIN_CHAT_ID
             if not admin_chat_id:
                 print("[WARNING] ADMIN_CHAT_ID не настроен, сообщение не отправлено")
                 return
 
             async def send_message():
+                reply_markup = None
+                if with_menu:
+                    keyboard = [[InlineKeyboardButton("📊 ГЛАВНОЕ МЕНЮ", callback_data="main_menu")]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+
+                await self.app.bot.send_message(
+                    chat_id=admin_chat_id,
+                    text=message,
+                    parse_mode=None,
+                    reply_markup=reply_markup
+                )
+
+            loop = self._loop
+            if loop and loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(send_message(), loop)
                 try:
-                    reply_markup = None
-                    if with_menu:
-                        # Создаем кнопку главного меню
-                        keyboard = [[InlineKeyboardButton("📊 ГЛАВНОЕ МЕНЮ", callback_data="main_menu")]]
-                        reply_markup = InlineKeyboardMarkup(keyboard)
-
-                    await self.app.bot.send_message(
-                        chat_id=admin_chat_id,
-                        text=message,
-                        parse_mode=None,
-                        reply_markup=reply_markup
-                    )
-                except Exception as e:
-                    print(f"[ERROR] Ошибка отправки сообщения: {e}")
-
-            # Используем существующий event loop бота
-            def run_async():
-                try:
-                    # Проверяем есть ли уже запущенный event loop
-                    try:
-                        loop = asyncio.get_running_loop()
-                        # Если loop уже есть, планируем выполнение
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(asyncio.run, send_message())
-                            future.result(timeout=10)
-                    except RuntimeError:
-                        # Нет активного loop, создаем новый
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(send_message())
-                        loop.close()
-                except Exception as e:
-                    print(f"[ERROR] Ошибка event loop: {e}")
-
-            thread = threading.Thread(target=run_async)
-            thread.start()
-            thread.join(timeout=10)  # Ждем максимум 10 секунд
+                    future.result(timeout=10)
+                except Exception as send_exc:
+                    print(f"[ERROR] Ошибка отправки сообщения: {send_exc}")
+            else:
+                asyncio.run(send_message())
 
         except Exception as e:
             print(f"[ERROR] Ошибка send_admin_message: {e}")
@@ -2126,6 +2107,7 @@ class TelegramBot:
             # Создаем новый event loop для потока
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            self._loop = loop
             try:
                 async def run_bot():
                     print("[DEBUG] Начинаем polling с обработкой команд...")
@@ -2141,6 +2123,8 @@ class TelegramBot:
                 traceback.print_exc()
             finally:
                 loop.close()
+                self._loop = None
+                self._is_running = False
 
         # Запускаем в отдельном потоке
         thread = threading.Thread(target=thread_worker, daemon=True)

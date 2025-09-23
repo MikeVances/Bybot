@@ -291,12 +291,13 @@ class BaseStrategy(ABC, PositionManagerMixin, StatisticsMixin, PriceUtilsMixin,
                     self.current_market_regime = market_analysis['condition'].regime
             
             # Получаем ATR
-            atr = TechnicalIndicators.calculate_atr_safe(df, self.config.atr_period).value
-            
+            atr_result = TechnicalIndicators.calculate_atr_safe(df, self.config.atr_period)
+            atr = float(atr_result.last_value) if atr_result.is_valid and atr_result.last_value else None
+
             # Базовые множители
             sl_multiplier = self.config.stop_loss_atr_multiplier
             rr_ratio = self.config.risk_reward_ratio
-            
+
             # Адаптация под рыночный режим
             if hasattr(self, 'current_market_regime'):
                 if self.current_market_regime == MarketRegime.VOLATILE:
@@ -312,7 +313,11 @@ class BaseStrategy(ABC, PositionManagerMixin, StatisticsMixin, PriceUtilsMixin,
             # Минимальные и максимальные отступы для безопасности
             min_sl_distance = entry_price * 0.005  # 0.5% минимум
             max_sl_distance = entry_price * 0.03   # 3% максимум
-            
+
+            if not atr or atr <= 0:
+                # Если ATR не рассчитан, используем запас 1% цены
+                atr = entry_price * 0.01
+
             if side in ['BUY', PositionSide.LONG]:
                 # Расчет SL с ограничениями
                 raw_sl = entry_price - (atr * sl_multiplier)

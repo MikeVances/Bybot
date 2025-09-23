@@ -106,12 +106,14 @@ class StrategyExecutionService:
                 config=config,
                 bot_state=state
             )
-            
+
             if signal:
+                if 'signal_type' not in signal and 'signal' in signal:
+                    signal['signal_type'] = signal['signal']
                 # Добавляем метаданные к сигналу
                 signal['strategy'] = strategy_name
                 signal['timestamp'] = market_data.get('timestamp')
-                
+
                 self.logger.info(f"🎯 Стратегия {strategy_name} сгенерировала сигнал: {signal.get('signal_type', 'UNKNOWN')}")
                 
                 # Валидируем сигнал
@@ -193,7 +195,8 @@ class StrategyExecutionService:
         
         # Проверяем тип сигнала
         valid_signal_types = [
-            'ENTER_LONG', 'ENTER_SHORT', 'EXIT_LONG', 'EXIT_SHORT', 'HOLD'
+            'ENTER_LONG', 'ENTER_SHORT', 'EXIT_LONG', 'EXIT_SHORT',
+            'BUY', 'SELL', 'HOLD'
         ]
         
         if signal['signal_type'] not in valid_signal_types:
@@ -201,7 +204,7 @@ class StrategyExecutionService:
             return False
         
         # Для сигналов входа проверяем дополнительные поля
-        if signal['signal_type'].startswith('ENTER_'):
+        if signal['signal_type'] in {'ENTER_LONG', 'ENTER_SHORT', 'BUY', 'SELL'}:
             if 'entry_price' not in signal and 'stop_loss' not in signal:
                 self.logger.warning("⚠️ Отсутствуют цена входа или стоп-лосс")
         

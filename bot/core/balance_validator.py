@@ -157,14 +157,18 @@ class BalanceValidator:
             return trade_amount * 100000 * 1.1
 
     def _get_current_price(self, api, symbol: str) -> float:
-        """Получить текущую цену символа"""
+        """Получить текущую цену символа через доступный OHLCV эндпоинт"""
         try:
-            response = api.get_tickers(category="linear", symbol=symbol)
-            if response['retCode'] == 0 and response['result']['list']:
-                return float(response['result']['list'][0]['lastPrice'])
-            return 50000.0  # Дефолтная цена для BTC
-        except:
-            return 50000.0
+            ohlcv = api.get_ohlcv(symbol=symbol, interval="1", limit=1)
+            if ohlcv is None or getattr(ohlcv, 'empty', False):
+                return 50000.0
+            # DataFrame или похожий объект: берём последний close
+            last_row = ohlcv.iloc[-1]
+            if 'close' in last_row:
+                return float(last_row['close'])
+        except Exception as exc:
+            logger.error(f"❌ Ошибка получения текущей цены через OHLCV: {exc}")
+        return 50000.0
 
     def check_emergency_stop_conditions(self, api) -> Tuple[bool, str]:
         """

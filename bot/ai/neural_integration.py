@@ -4,7 +4,7 @@
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 import logging
 import json
@@ -37,6 +37,7 @@ class NeuralIntegration:
         self.active_bets = {}  # {bet_id: bet_info}
         self.completed_trades = []  # История завершенных сделок
         self.strategy_performance_cache = {}  # Кеш анализа стратегий
+        self.max_cache_entries = 32
         
         # Параметры анализа
         self.profit_threshold = 0.5  # Минимальная прибыль для успешной сделки (%)
@@ -51,7 +52,7 @@ class NeuralIntegration:
         # Метрики качества
         self.prediction_accuracy_history = []
         self.confidence_calibration_history = []
-        self.last_performance_check = datetime.now()
+        self.last_performance_check = self._now()
         
         # Автоматическое обучение
         self.auto_learning_enabled = True
@@ -68,15 +69,44 @@ class NeuralIntegration:
         self._load_active_strategies()
         
         # Отслеживание изменений файла стратегий
-        self.last_file_check = datetime.now()
+        self.last_file_check = self._now()
         self.file_check_interval = 300  # Проверяем каждые 5 минут
         self.last_file_mtime = 0
-    
+
+    def _now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def _normalize_timestamp(self, ts: Optional[datetime]) -> Optional[datetime]:
+        if ts is None:
+            return None
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts
+
+    def _prune_strategy_cache(self, current_time: datetime) -> None:
+        cutoff = current_time - timedelta(minutes=self.cache_ttl_minutes)
+        keys_to_remove = []
+        for key, payload in self.strategy_performance_cache.items():
+            entry_ts = self._normalize_timestamp(payload.get('timestamp'))
+            if entry_ts is None or entry_ts < cutoff:
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            self.strategy_performance_cache.pop(key, None)
+
+        if len(self.strategy_performance_cache) > self.max_cache_entries:
+            sorted_keys = sorted(
+                self.strategy_performance_cache.items(),
+                key=lambda item: self._normalize_timestamp(item[1].get('timestamp')) or datetime.min.replace(tzinfo=timezone.utc)
+            )
+            for key, _ in sorted_keys[:-self.max_cache_entries]:
+                self.strategy_performance_cache.pop(key, None)
+
     def _check_strategies_file_changes(self) -> bool:
         """Проверка изменений в файле активных стратегий"""
         try:
-            current_time = datetime.now()
-            
+            current_time = self._now()
+
             # Проверяем интервал проверки
             if (current_time - self.last_file_check).total_seconds() < self.file_check_interval:
                 return False
@@ -231,12 +261,14 @@ class NeuralIntegration:
         """Расширенный анализ результатов стратегий с кешированием"""
         try:
             # Проверяем кеш
-            current_time = datetime.now()
+            current_time = self._now()
             cache_key = f"strategy_analysis_{trade_journal_path}"
-            
-            if (cache_key in self.strategy_performance_cache and 
-                (current_time - self.strategy_performance_cache[cache_key]['timestamp']).total_seconds() < self.cache_ttl_minutes * 60):
-                return self.strategy_performance_cache[cache_key]['data']
+
+            if cache_key in self.strategy_performance_cache:
+                cached_entry = self.strategy_performance_cache[cache_key]
+                cached_ts = self._normalize_timestamp(cached_entry.get('timestamp'))
+                if cached_ts and (current_time - cached_ts).total_seconds() < self.cache_ttl_minutes * 60:
+                    return cached_entry['data']
             
             # Проверяем существование файла
             if not os.path.exists(trade_journal_path):
@@ -325,7 +357,9 @@ class NeuralIntegration:
                 'data': strategy_results,
                 'timestamp': current_time
             }
-            
+
+            self._prune_strategy_cache(current_time)
+
             return strategy_results
             
         except Exception as e:
@@ -339,17 +373,24 @@ class NeuralIntegration:
                 return {}
             
             # Анализ по часам дня
-            strategy_df['hour'] = strategy_df['timestamp'].dt.hour
+            strategy_df = strategy_df.copy()
+            timestamps = strategy_df['timestamp']
+
+            strategy_df['hour'] = timestamps.dt.hour
             hourly_stats = strategy_df.groupby('hour').size().to_dict()
             
             # Анализ по дням недели
-            strategy_df['weekday'] = strategy_df['timestamp'].dt.weekday
+            strategy_df['weekday'] = timestamps.dt.weekday
             weekday_stats = strategy_df.groupby('weekday').size().to_dict()
             
             # Активность в последние дни
             recent_days = 7
-            cutoff_date = datetime.now() - timedelta(days=recent_days)
-            recent_activity = len(strategy_df[strategy_df['timestamp'] > cutoff_date])
+            tzinfo = timestamps.dt.tz
+            now = self._now()
+            if tzinfo is not None:
+                now = now.astimezone(tzinfo)
+            cutoff_date = now - timedelta(days=recent_days)
+            recent_activity = len(strategy_df[timestamps > cutoff_date])
             
             return {
                 'hourly_distribution': hourly_stats,
@@ -773,7 +814,7 @@ class NeuralIntegration:
                     'success_rate': best_strategy[1]['success_rate'],
                     'profit_factor': best_strategy[1]['profit_factor'],
                     'threshold_used': dynamic_threshold,
-                    'timestamp': datetime.now().isoformat(),
+                    'timestamp': self._now().isoformat(),
                     'all_recommendations': combined_recommendations,
                     'market_conditions': self._assess_current_market_conditions(market_data)
                 }
@@ -897,7 +938,7 @@ class NeuralIntegration:
         """Обновление истории точности предсказаний"""
         try:
             self.prediction_accuracy_history.append({
-                'timestamp': datetime.now().isoformat(),
+                'timestamp': self._now().isoformat(),
                 'strategy': recommendation['strategy'],
                 'confidence': recommendation['confidence'],
                 'neural_score': recommendation['neural_score'],
@@ -923,7 +964,7 @@ class NeuralIntegration:
             bet = self.neural_trader.make_bet(market_data, strategy_signals)
             
             if bet:
-                bet_id = f"neural_bet_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:20]}"
+                bet_id = f"neural_bet_{self._now().strftime('%Y%m%d_%H%M%S_%f')[:20]}"
                 bet['bet_id'] = bet_id
                 bet['type'] = 'neural_bet'
                 bet['recommendation'] = recommendation
@@ -991,7 +1032,7 @@ class NeuralIntegration:
             completed_trade = {
                 'bet': bet,
                 'result': result,
-                'completion_time': datetime.now().isoformat(),
+                'completion_time': self._now().isoformat(),
                 'duration_hours': self._calculate_bet_duration(bet),
                 'market_conditions_at_close': self._get_current_market_snapshot(),
                 'analysis': {
@@ -1058,7 +1099,7 @@ class NeuralIntegration:
         """Расчет продолжительности ставки в часах"""
         try:
             bet_time = datetime.fromisoformat(bet['timestamp'])
-            current_time = datetime.now()
+            current_time = self._now()
             duration = (current_time - bet_time).total_seconds() / 3600
             return duration
         except:
@@ -1068,7 +1109,7 @@ class NeuralIntegration:
         """Получение текущего снимка рыночных условий"""
         # Здесь можно добавить логику получения актуальных рыночных данных
         return {
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': self._now().isoformat(),
             'note': 'Market snapshot not implemented'
         }
     
@@ -1078,7 +1119,7 @@ class NeuralIntegration:
             if not self.auto_learning_enabled:
                 return
             
-            current_time = datetime.now()
+            current_time = self._now()
             time_since_last = (current_time - self.last_performance_check).total_seconds() / 3600
             
             if (time_since_last >= self.learning_frequency_hours and 
@@ -1113,7 +1154,7 @@ class NeuralIntegration:
                 'active_bets': len(self.active_bets),
                 'completed_trades': len(self.completed_trades),
                 'total_neural_trades': len(self.completed_trades),
-                'integration_uptime_hours': (datetime.now() - self.last_performance_check).total_seconds() / 3600
+                'integration_uptime_hours': (self._now() - self.last_performance_check).total_seconds() / 3600
             }
             
             # Анализ стратегий
@@ -1317,7 +1358,7 @@ class NeuralIntegration:
     
     def cleanup_old_bets(self):
         """Улучшенная очистка старых ставок"""
-        current_time = datetime.now()
+        current_time = self._now()
         expired_bets = []
         
         for bet_id, bet in self.active_bets.items():
@@ -1358,7 +1399,7 @@ class NeuralIntegration:
         try:
             state = {
                 'version': '2.0',
-                'timestamp': datetime.now().isoformat(),
+                'timestamp': self._now().isoformat(),
                 'active_bets': self.active_bets,
                 'completed_trades': self.completed_trades[-200:],  # Последние 200 сделок
                 'prediction_accuracy_history': self.prediction_accuracy_history[-100:],
@@ -1386,7 +1427,7 @@ class NeuralIntegration:
                 json.dump(state, f, indent=2, default=str)
             
             # Бэкап с временной меткой
-            backup_filename = f"data/ai/neural_integration_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            backup_filename = f"data/ai/neural_integration_backup_{self._now().strftime('%Y%m%d_%H%M%S')}.json"
             with open(backup_filename, 'w') as f:
                 json.dump(state, f, default=str)
             
@@ -1452,7 +1493,7 @@ class NeuralIntegration:
                 try:
                     self.last_performance_check = datetime.fromisoformat(statistics['last_performance_check'])
                 except:
-                    self.last_performance_check = datetime.now()
+                    self.last_performance_check = self._now()
             
             self.logger.info(f"Состояние загружено: {len(self.active_bets)} активных ставок, "
                            f"{len(self.completed_trades)} завершенных сделок")
@@ -1473,7 +1514,7 @@ class NeuralIntegration:
         self.confidence_calibration_history = []
         
         # Сбрасываем временные метки
-        self.last_performance_check = datetime.now()
+        self.last_performance_check = self._now()
         
         # Сбрасываем нейронную сеть
         self.neural_trader.reset_model()

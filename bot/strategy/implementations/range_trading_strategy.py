@@ -534,9 +534,10 @@ class RangeTradingStrategy(BaseStrategy):
         try:
             # Используем ATR для расчета уровней
             atr_period = 14
-            atr = TechnicalIndicators.calculate_atr(df, atr_period)
+            atr_result = TechnicalIndicators.calculate_atr_safe(df, atr_period)
+            atr = atr_result.last_value if atr_result and atr_result.is_valid else None
             
-            if atr is None or atr == 0:
+            if not atr or atr <= 0:
                 atr = entry_price * 0.01  # 1% от цены
             
             # Узкие уровни для диапазона
