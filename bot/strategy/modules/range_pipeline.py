@@ -8,7 +8,14 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from bot.strategy.pipeline.common import PositionPlan, SignalDecision, StrategyIndicators
+from bot.strategy.pipeline.common import (
+    PositionPlan,
+    SignalDecision,
+    StrategyIndicators,
+    IndicatorEngine,
+    SignalGenerator,
+    PositionSizer,
+)
 from bot.strategy.utils.indicators import TechnicalIndicators
 
 
@@ -33,7 +40,7 @@ def _infer_trade_amount(config: Any) -> float:
         return 0.001
 
 
-class RangeIndicatorEngine:
+class RangeIndicatorEngine(IndicatorEngine):
     """Calculates indicators used by the range trading strategy."""
 
     def __init__(self, config: Any, base_indicator_fn=None):
@@ -137,7 +144,7 @@ class RangeIndicatorEngine:
 
         return StrategyIndicators(data=indicators, metadata={"rows": len(df)})
 
-class RangeSignalGenerator:
+class RangeSignalGenerator(SignalGenerator):
     """Generates actionable signals based on indicator bundle."""
 
     def __init__(self, config: Any):
@@ -263,7 +270,7 @@ class RangeSignalGenerator:
         )
 
 
-class RangePositionSizer:
+class RangePositionSizer(PositionSizer):
     """Derives position parameters (size, levels) for the strategy."""
 
     def __init__(self, config: Any, round_price_fn):

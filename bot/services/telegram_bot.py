@@ -2,14 +2,26 @@
 import logging
 import nest_asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
 # Разрешить вложенные event loops для совместимости с интерактивными средами
 nest_asyncio.apply()
 from bot.exchange.api_adapter import create_trading_bot_adapter
 from bot.exchange.bybit_api_v5 import BybitAPIV5
 from bot.cli import load_active_strategy, save_active_strategy
-from config import TELEGRAM_TOKEN, get_strategy_config, USE_V5_API, USE_TESTNET, BYBIT_API_KEY, BYBIT_API_SECRET
+from config import (
+    TELEGRAM_TOKEN,
+    get_strategy_config,
+    USE_V5_API,
+    USE_TESTNET,
+    BYBIT_API_KEY,
+    BYBIT_API_SECRET,
+)
 
 # Импортируем конфигурацию для ADMIN_CHAT_ID
 try:
@@ -45,6 +57,27 @@ class TelegramBot:
         self._is_running = False
         self._bot_thread = None
         self._loop = None
+        self._admin_id = ADMIN_CHAT_ID
+
+    def _is_authorized(self, update: Update) -> bool:
+        if self._admin_id is None:
+            return True
+        user = update.effective_user
+        chat = update.effective_chat
+        return (user and user.id == self._admin_id) or (chat and chat.id == self._admin_id)
+
+    async def _ensure_authorized(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+        if self._is_authorized(update):
+            return True
+        warning = "🔒 Недостаточно прав для выполнения этой команды"
+        try:
+            chat_id = update.effective_chat.id if update.effective_chat else None
+            if chat_id is not None:
+                await context.bot.send_message(chat_id=chat_id, text=warning)
+        except Exception:
+            pass
+        logging.warning("Неавторизованная попытка доступа: user=%s chat=%s", update.effective_user, update.effective_chat)
+        return False
     
     def _escape_markdown(self, text: str) -> str:
         """Экранирование специальных символов для MarkdownV2"""
@@ -148,6 +181,8 @@ class TelegramBot:
         return [os.path.splitext(os.path.basename(f))[0] for f in files]
 
     async def _start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         print("[DEBUG] Получена команда /start")
         start_text = ("🤖 Мультистратегический торговый бот\n\n"
                  "Доступные команды:\n"
@@ -165,6 +200,8 @@ class TelegramBot:
         )
 
     async def _balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать баланс аккаунта"""
         try:
             # Получаем API credentials для Telegram bot
@@ -205,6 +242,8 @@ class TelegramBot:
             )
 
     async def _position(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать текущие позиции"""
         try:
             # Используем API v5 для получения позиций
@@ -274,6 +313,8 @@ class TelegramBot:
             )
 
     async def _all_strategies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать статус всех стратегий"""
         try:
             # Используем новые стратегии вместо старых
@@ -381,6 +422,8 @@ class TelegramBot:
             )
 
     async def _strategy_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать активность и состояние всех стратегий"""
         try:
             # Используем правильные имена файлов логов
@@ -520,6 +563,8 @@ class TelegramBot:
             )
 
     async def _strategies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать меню управления стратегиями"""
         keyboard = [
             [
@@ -541,6 +586,8 @@ class TelegramBot:
         )
 
     async def _trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать последние торговые сигналы с детальной аналитикой оптимизированных стратегий"""
         try:
             # Читаем журнал торговых сигналов
@@ -687,6 +734,8 @@ class TelegramBot:
             )
 
     async def _logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать логи бота"""
         try:
             # Проверяем разные файлы логов
@@ -746,6 +795,8 @@ class TelegramBot:
             )
 
     async def _menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать главное меню"""
         keyboard = [
             [
@@ -783,6 +834,8 @@ class TelegramBot:
         )
 
     async def _on_menu_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Обработка нажатий кнопок меню"""
         query = update.callback_query
         await query.answer()
@@ -837,6 +890,8 @@ class TelegramBot:
             await self._settings_notifications(update, context)
 
     async def _on_strategy_toggle(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         query = update.callback_query
         if not query or not query.data or not query.data.startswith("toggle_strategy:"):
             return
@@ -860,6 +915,8 @@ class TelegramBot:
             await query.answer(f"Ошибка: {e}", show_alert=True)
 
     async def _on_profit_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Обработка кнопок статистики прибыли"""
         query = update.callback_query
         await query.answer()
@@ -892,6 +949,8 @@ class TelegramBot:
             )
 
     async def _settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать настройки"""
         keyboard = [
             [
@@ -916,6 +975,8 @@ class TelegramBot:
         )
 
     async def _status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать детальный статус бота в стиле Freqtrade"""
         try:
             # Получаем баланс
@@ -1018,6 +1079,8 @@ class TelegramBot:
             )
 
     async def _charts(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать аналитику торговых результатов"""
         try:
             import pandas as pd
@@ -1170,6 +1233,8 @@ class TelegramBot:
             )
 
     async def _prometheus(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать метрики Prometheus"""
         try:
             # Получаем метрики с нашего экспортера
@@ -1280,6 +1345,8 @@ class TelegramBot:
         await self._edit_message_with_keyboard(update, context, prometheus_text, keyboard, parse_mode=None)
 
     async def _stop_trading(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Остановить торговлю"""
         try:
             result = subprocess.run(['sudo', 'systemctl', 'stop', 'bybot-trading.service'], 
@@ -1313,6 +1380,8 @@ class TelegramBot:
             )
 
     async def _start_trading(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Запустить торговлю"""
         try:
             result = subprocess.run(['sudo', 'systemctl', 'start', 'bybot-trading.service'], 
@@ -1346,6 +1415,8 @@ class TelegramBot:
             )
 
     async def _settings_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Настройки риска"""
         risk_text = "🎯 *Настройки риска*\n\n"\
             "• Размер позиции: 1% от баланса\n"\
@@ -1362,6 +1433,8 @@ class TelegramBot:
         )
 
     async def _settings_timeframes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Настройки таймфреймов"""
         timeframes_text = "⏰ *Таймфреймы*\n\n"\
             "Используемые таймфреймы:\n"\
@@ -1379,6 +1452,8 @@ class TelegramBot:
         )
 
     async def _settings_strategies(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Настройки стратегий"""
         strategy_names = get_active_strategies()
         strategies_text = "🎯 *Активные стратегии:*\n\n"
@@ -1394,6 +1469,8 @@ class TelegramBot:
         await self._edit_message_with_keyboard(update, context, strategies_text, keyboard, parse_mode=None)
 
     async def _settings_notifications(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Настройки уведомлений"""
         notifications_text = "🔔 *Уведомления*\n\n"\
             "• Уведомления о сигналах стратегий\n"\
@@ -1410,6 +1487,8 @@ class TelegramBot:
         )
 
     async def _profit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать детальную статистику прибыли в стиле Freqtrade"""
         try:
             # Получаем данные о сделках
@@ -1506,6 +1585,8 @@ class TelegramBot:
             )
 
     async def _profit_details(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать детальную статистику прибыли по стратегиям"""
         try:
             import pandas as pd
@@ -1628,6 +1709,8 @@ class TelegramBot:
             )
 
     async def _neural(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать информацию о нейронной сети"""
         try:
             from bot.ai import NeuralIntegration
@@ -1724,6 +1807,8 @@ class TelegramBot:
             )
 
     async def _analytics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать детальную аналитику торговли"""
         try:
             import pandas as pd
@@ -1837,6 +1922,8 @@ class TelegramBot:
             )
 
     async def _statistics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать статистику системы и производительности"""
         try:
             import pandas as pd
@@ -1992,6 +2079,8 @@ class TelegramBot:
             print(f"[ERROR] Ошибка send_admin_message: {e}")
 
     async def _cmd_api_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать здоровье API подключений"""
         try:
             from bot.monitoring.api_health_monitor import get_api_health_monitor
@@ -2045,6 +2134,8 @@ class TelegramBot:
             await update.message.reply_text(f"❌ Ошибка получения API статуса: {e}")
 
     async def _cmd_blocks(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self._ensure_authorized(update, context):
+            return
         """Показать информацию о блокировках"""
         try:
             from bot.core.blocking_alerts import get_blocking_alerts_manager

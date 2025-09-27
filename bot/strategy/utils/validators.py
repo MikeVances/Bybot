@@ -9,7 +9,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Union, Any
 from datetime import datetime, timezone, timedelta
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from ..base.enums import ValidationLevel, TimeFrame
@@ -62,6 +62,15 @@ class ValidationResult:
     def __str__(self) -> str:
         status = "✅ ВАЛИДНЫ" if self.is_valid else "❌ НЕ ВАЛИДНЫ"
         return f"Данные {status} | Качество: {self.quality.value} | Точек: {self.data_points}"
+
+
+@dataclass
+class SafetyCheckResult:
+    """Результат проверки безопасности данных."""
+
+    is_safe: bool
+    reason: str = ""
+    warnings: List[str] = field(default_factory=list)
 
 
 class DataValidator:
@@ -225,7 +234,7 @@ class DataValidator:
                 time_coverage=time_coverage,
                 recommendations=recommendations
             )
-            
+
         except Exception as e:
             logger.error(f"Критическая ошибка валидации: {e}")
             return ValidationResult(
@@ -238,12 +247,63 @@ class DataValidator:
                 time_coverage=None,
                 recommendations=["Проверьте формат и структуру данных"]
             )
-    
+
+    @staticmethod
+    def validate_market_data_safety(
+        df: pd.DataFrame,
+        *,
+        max_staleness: Optional[timedelta] = None,
+    ) -> SafetyCheckResult:
+        """Проверка критичных условий безопасности рынка перед расчетами."""
+
+        try:
+            if df is None or df.empty:
+                return SafetyCheckResult(False, "Empty DataFrame - API failure")
+
+            if 'volume' in df.columns:
+                volume_sum = float(df['volume'].fillna(0).sum())
+                if volume_sum == 0:
+                    return SafetyCheckResult(False, "Zero volume detected - fake or halted market")
+
+            if 'close' in df.columns:
+                if df['close'].isna().any():
+                    return SafetyCheckResult(False, "NaN prices detected in close column")
+
+            if 'close' in df.columns and 'open' in df.columns:
+                if np.isclose(df['close'], df['open']).all():
+                    return SafetyCheckResult(False, "Flat prices detected - market halt or bad data")
+
+            warnings: List[str] = []
+            if max_staleness and isinstance(df.index, pd.DatetimeIndex) and len(df):
+                last_ts = df.index[-1]
+                if last_ts.tzinfo is None:
+                    last_ts = last_ts.tz_localize(timezone.utc)
+                else:
+                    last_ts = last_ts.tz_convert(timezone.utc)
+
+                now = datetime.now(timezone.utc)
+                age = now - last_ts
+                if age > max_staleness:
+                    return SafetyCheckResult(
+                        False,
+                        f"Stale data detected ({age.total_seconds() / 60:.1f} minutes old)",
+                    )
+                if age > max_staleness * 0.5:
+                    warnings.append(
+                        f"Data close timestamp age is {age.total_seconds() / 60:.1f} minutes",
+                    )
+
+            return SafetyCheckResult(True, warnings=warnings)
+
+        except Exception as exc:
+            logger.error(f"Ошибка проверки безопасности данных: {exc}")
+            return SafetyCheckResult(False, f"Safety check failed: {exc}")
+
     @staticmethod
     def _validate_ohlc_logic(df: pd.DataFrame) -> List[str]:
         """Проверка логичности OHLC данных"""
         issues = []
-        
+
         try:
             # Проверка что high >= low
             high_low_invalid = (df['low'] > df['high']).any()

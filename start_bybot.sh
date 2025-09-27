@@ -46,8 +46,8 @@ echo
 echo -e "${BLUE}🎯 Выберите режим:${NC}"
 echo "1. 🚀 Быстрый запуск (Full System)"
 echo "2. ℹ️  Статус системы"
-echo "3. 🧪 Тест Telegram бота"
-echo "4. 🛑 Остановить все сервисы"
+echo "3. 🧪 Тест отправки Telegram"
+echo "4. 🛑 Остановить фоновые процессы"
 echo "5. 📋 Подробное меню"
 echo
 
@@ -98,21 +98,30 @@ except Exception as e:
 "
         ;;
     3)
-        echo -e "${CYAN}🧪 Тест простого Telegram бота...${NC}"
-        python test_telegram_simple.py
+        echo -e "${CYAN}🧪 Отправляю тестовое сообщение в Telegram...${NC}"
+        if [[ -f "send_test_message.py" ]]; then
+            python send_test_message.py || echo -e "${YELLOW}⚠️  Не удалось отправить сообщение (проверьте токен).${NC}"
+        else
+            echo -e "${YELLOW}⚠️  Скрипт send_test_message.py не найден.${NC}"
+        fi
         ;;
     4)
-        echo -e "${RED}🛑 Остановка сервисов...${NC}"
-        echo "Останавливаю systemd сервисы..."
-        sudo systemctl stop bybot-trading.service 2>/dev/null || echo "bybot-trading не запущен"
-        sudo systemctl stop bybot-telegram.service 2>/dev/null || echo "bybot-telegram не запущен"
+        echo -e "${RED}🛑 Останавливаю фоновые процессы...${NC}"
+
+        if command -v systemctl >/dev/null 2>&1; then
+            echo "Пробую остановить systemd сервисы..."
+            sudo systemctl stop bybot-trading.service 2>/dev/null || echo "bybot-trading не запущен"
+            sudo systemctl stop bybot-telegram.service 2>/dev/null || echo "bybot-telegram не запущен"
+        else
+            echo -e "${YELLOW}⚠️  systemctl недоступен — пропускаю остановку сервисов.${NC}"
+        fi
 
         echo "Завершаю процессы Python..."
         pkill -f "python.*main.py" 2>/dev/null || echo "main.py не запущен"
         pkill -f "python.*bot.core.trader" 2>/dev/null || echo "bot.core.trader не запущен"
         pkill -f "python.*metrics_exporter" 2>/dev/null || echo "metrics_exporter не запущен"
 
-        echo -e "${GREEN}✅ Все сервисы остановлены${NC}"
+        echo -e "${GREEN}✅ Обработка завершена${NC}"
         ;;
     5)
         echo -e "${PURPLE}📋 Подробное меню (будущая функция)${NC}"

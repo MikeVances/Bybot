@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any, Tuple, Union
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import logging
 
 from .config import BaseStrategyConfig
@@ -155,6 +155,8 @@ class BaseStrategy(ABC, PositionManagerMixin, StatisticsMixin, PriceUtilsMixin,
         """
         try:
             # Определяем тип данных
+            max_staleness = timedelta(minutes=self.config.max_data_staleness_minutes)
+
             if isinstance(market_data, dict):
                 # Мультитаймфрейм данные
                 if not market_data:
@@ -168,12 +170,24 @@ class BaseStrategy(ABC, PositionManagerMixin, StatisticsMixin, PriceUtilsMixin,
                     result = DataValidator.validate_basic_data(df, self.config.validation_level)
                     if not result.is_valid:
                         return False, f"Ошибка валидации {tf}: {result.errors[0] if result.errors else 'Неизвестная ошибка'}"
+
+                    safety = DataValidator.validate_market_data_safety(df, max_staleness=max_staleness)
+                    if not safety.is_safe:
+                        return False, f"Проблемы данных {tf}: {safety.reason}"
+                    for warning in safety.warnings:
+                        self.logger.warning(f"Предупреждение качества данных {tf}: {warning}")
             
             elif isinstance(market_data, pd.DataFrame):
                 # Одиночный DataFrame
                 result = DataValidator.validate_basic_data(market_data, self.config.validation_level)
                 if not result.is_valid:
                     return False, f"Ошибка валидации данных: {result.errors[0] if result.errors else 'Неизвестная ошибка'}"
+
+                safety = DataValidator.validate_market_data_safety(market_data, max_staleness=max_staleness)
+                if not safety.is_safe:
+                    return False, f"Проблемы данных: {safety.reason}"
+                for warning in safety.warnings:
+                    self.logger.warning(f"Предупреждение качества данных: {warning}")
             
             else:
                 return False, f"Неподдерживаемый тип данных: {type(market_data)}"

@@ -295,8 +295,9 @@ def start_trading():
         
         # 4. Запускаем основной торговый цикл с новыми стратегиями
         run_trading_with_risk_management(
-            risk_manager, 
-            shutdown_event
+            risk_manager,
+            shutdown_event,
+            telegram_bot=telegram_bot
         )
         
     except KeyboardInterrupt:

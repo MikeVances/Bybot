@@ -192,10 +192,40 @@ class RiskManager:
         from config import get_strategy_config
         config = get_strategy_config(strategy_name)
         trade_amount = config.get('trade_amount', 0.001)
-        
+        min_trade_amount = config.get('min_trade_amount', trade_amount)
+
         position_value = entry_price * trade_amount
+        min_position_value = entry_price * min_trade_amount
         max_position_value = current_balance * limits.max_position_size_pct / 100
-        
+
+        # Если текущий лимит ниже минимально допустимого объема, поднимаем его
+        if max_position_value < min_position_value:
+            max_position_value = min_position_value
+            self.logger.debug(
+                "⚠️ Коррекция лимита позиции до минимального значения",
+                extra={
+                    'strategy': strategy_name,
+                    'symbol': signal.get('symbol', 'UNKNOWN'),
+                    'current_balance': current_balance,
+                    'original_limit': current_balance * limits.max_position_size_pct / 100,
+                    'min_position_value': min_position_value,
+                }
+            )
+
+        if max_position_value < min_position_value:
+            self.logger.debug(
+                "⚠️ Коррекция лимита позиции: минимально допустимый объем выше текущего лимита",
+                extra={
+                    'strategy': strategy_name,
+                    'symbol': signal.get('symbol', 'UNKNOWN'),
+                    'max_position_value': max_position_value,
+                    'min_position_value': min_position_value,
+                    'min_trade_amount': min_trade_amount,
+                    'entry_price': entry_price,
+                }
+            )
+            max_position_value = min_position_value
+
         if position_value > max_position_value:
             report_order_block(
                 reason="position_limit",
@@ -206,7 +236,8 @@ class RiskManager:
                     "position_value": position_value,
                     "max_position_value": max_position_value,
                     "current_balance": current_balance,
-                    "position_size_pct": limits.max_position_size_pct
+                    "position_size_pct": limits.max_position_size_pct,
+                    "min_trade_amount": min_trade_amount
                 }
             )
             return False, f"Размер позиции слишком большой (${position_value:.2f} > ${max_position_value:.2f})"

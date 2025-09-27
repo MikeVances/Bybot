@@ -4,10 +4,12 @@
 
 import time as time_module
 import csv
+import uuid
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import importlib
 import os
+import tempfile
 import pandas as pd
 import threading
 from typing import Optional, Dict, Any
@@ -26,6 +28,11 @@ from bot.core.error_handler import get_error_handler, handle_trading_error, Erro
 from bot.core.emergency_stop import global_emergency_stop
 from bot.core.global_circuit_breaker import global_circuit_breaker
 from bot.core.exceptions import OrderRejectionError, RateLimitError, EmergencyStopError
+from bot.core.enhanced_api_connection import (
+    get_enhanced_connection_manager,
+    ConnectionState,
+)
+from bot.core.blocking_alerts import report_order_block
 
 # Импорты основных компонентов бота
 from bot.risk import RiskManager
@@ -255,15 +262,51 @@ def setup_strategy_logger(strategy_name):
 def log_trade_journal(strategy_name, signal, all_market_data):
     """Расширенное логирование сигналов в журнал сделок"""
     filename = "data/trade_journal.csv"
+    signals_log_file = "data/signals_log.csv"
     os.makedirs("data", exist_ok=True)
-    
+
     fieldnames = [
-        'timestamp', 'strategy', 'signal', 'entry_price', 'stop_loss', 'take_profit', 'comment',
+        'timestamp', 'signal_id', 'strategy', 'signal', 'entry_price', 'stop_loss', 'take_profit', 'comment',
         'tf', 'open', 'high', 'low', 'close', 'volume', 'signal_strength', 'risk_reward_ratio'
     ]
-    
+
+    signal_log_fields = [
+        'timestamp', 'signal_id', 'strategy', 'signal', 'entry_price', 'stop_loss', 'take_profit',
+        'comment', 'signal_strength', 'risk_reward_ratio', 'confluence_factors'
+    ]
+
+    _ensure_trade_journal_schema(filename, fieldnames)
+    _ensure_csv_header(signals_log_file, signal_log_fields)
+
     current_timestamp = datetime.now(timezone.utc).isoformat()
-    
+    signal_id = signal.get('signal_id')
+    if not signal_id:
+        signal_id = f"sig_{uuid.uuid4()}"
+        signal['signal_id'] = signal_id
+
+    # Логируем агрегированную информацию по сигналу (1 строка на событие)
+    aggregated_row = {
+        'timestamp': current_timestamp,
+        'signal_id': signal_id,
+        'strategy': strategy_name,
+        'signal': signal.get('signal', ''),
+        'entry_price': signal.get('entry_price', ''),
+        'stop_loss': signal.get('stop_loss', ''),
+        'take_profit': signal.get('take_profit', ''),
+        'comment': signal.get('comment', ''),
+        'signal_strength': signal.get('signal_strength', 0),
+        'risk_reward_ratio': signal.get('risk_reward_ratio', 0),
+        'confluence_factors': ','.join(signal.get('confluence_factors', [])) if signal.get('confluence_factors') else ''
+    }
+
+    with open(signals_log_file, 'a', newline='') as sig_file:
+        sig_writer = csv.DictWriter(sig_file, fieldnames=signal_log_fields)
+        if sig_file.tell() == 0:
+            sig_writer.writeheader()
+        sig_writer.writerow(aggregated_row)
+
+    _persist_market_snapshots(all_market_data, signal_id, current_timestamp)
+
     # Для каждого таймфрейма логируем последнюю свечу
     for tf, df in all_market_data.items():
         if df is None or len(df) == 0:
@@ -278,6 +321,7 @@ def log_trade_journal(strategy_name, signal, all_market_data):
             
             row = {
                 'timestamp': current_timestamp,
+                'signal_id': signal_id,
                 'strategy': strategy_name,
                 'signal': signal.get('signal', ''),
                 'entry_price': signal.get('entry_price', ''),
@@ -299,9 +343,89 @@ def log_trade_journal(strategy_name, signal, all_market_data):
                 if f.tell() == 0:
                     writer.writeheader()
                 writer.writerow(row)
-                
+
         except Exception as e:
             logging.error(f"❌ Ошибка записи журнала для {tf}: {e}")
+
+
+def _persist_market_snapshots(all_market_data, signal_id: str, timestamp: str) -> None:
+    """Сохраняет снимки рыночных данных по всем таймфреймам на момент сигнала."""
+
+    try:
+        snapshot_root = os.path.join('data', 'snapshots', timestamp[:10])
+        os.makedirs(snapshot_root, exist_ok=True)
+        for tf, df in all_market_data.items():
+            if df is None or df.empty:
+                continue
+
+            tf_safe = str(tf).replace('/', '_')
+            snapshot_path = os.path.join(snapshot_root, f"{signal_id}_{tf_safe}.csv")
+            try:
+                df_to_save = df.copy()
+                df_to_save.to_csv(snapshot_path, index=True, index_label='timestamp')
+            except Exception as inner_exc:
+                logging.error(f"❌ Не удалось сохранить snapshot для {tf}: {inner_exc}")
+    except Exception as exc:
+        logging.error(f"❌ Ошибка сохранения snapshots: {exc}")
+
+
+def _ensure_csv_header(path: str, fieldnames: list[str]) -> None:
+    """Создаёт CSV с нужным заголовком, если файл отсутствует."""
+
+    if not os.path.exists(path):
+        with open(path, 'w', newline='', encoding='utf-8') as outfile:
+            writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+            writer.writeheader()
+
+
+def _ensure_trade_journal_schema(path: str, fieldnames: list[str]) -> None:
+    """Мигрирует существующий trade_journal.csv к новой схеме с signal_id."""
+
+    if not os.path.exists(path):
+        _ensure_csv_header(path, fieldnames)
+        return
+
+    with open(path, newline='', encoding='utf-8') as infile:
+        reader = csv.reader(infile)
+        try:
+            existing_header = next(reader)
+        except StopIteration:
+            existing_header = []
+        rows = list(reader)
+
+    if existing_header == fieldnames:
+        return
+
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix='trade_journal_', suffix='.csv')
+    os.close(tmp_fd)
+
+    try:
+        with open(tmp_path, 'w', newline='', encoding='utf-8') as outfile:
+            writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+            writer.writeheader()
+
+            for row in rows:
+                mapping: Dict[str, Any] = {key: '' for key in fieldnames}
+
+                for idx, value in enumerate(row):
+                    if idx < len(existing_header):
+                        key = existing_header[idx]
+                        if key in mapping:
+                            mapping[key] = value
+
+                if 'signal_id' not in existing_header:
+                    mapping['signal_id'] = f"legacy_{uuid.uuid4()}"
+
+                writer.writerow(mapping)
+
+        os.replace(tmp_path, path)
+        logging.info("🔄 trade_journal.csv мигрирован под новую схему (%s)", ','.join(fieldnames))
+    except Exception as exc:
+        logging.error(f"❌ Ошибка миграции trade_journal: {exc}")
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
 def get_current_balance(api):
     """Получение текущего баланса с обработкой ошибок"""
@@ -382,7 +506,12 @@ def sync_position_with_exchange(api, state: BotState, symbol: str = None):
     except Exception as e:
         logging.error(f"❌ Ошибка синхронизации с биржей: {e}")
 
-def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: threading.Event):
+def run_trading_with_risk_management(
+    risk_manager: RiskManager,
+    shutdown_event: threading.Event,
+    *,
+    telegram_bot: Optional[Any] = None,
+):
     """Основной торговый цикл с полным риск-менеджментом"""
     
     # Настройка логирования
@@ -401,16 +530,21 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
     main_logger.info("🗂️ TTL кэширование инициализировано для предотвращения memory leaks")
     
     try:
-        # Инициализируем Telegram бот для уведомлений
-        telegram_bot = None
-        try:
-            from config import TELEGRAM_TOKEN
-            from bot.services.telegram_bot import TelegramBot
-            telegram_bot = TelegramBot(TELEGRAM_TOKEN)
-            main_logger.info("📱 Telegram бот инициализирован для уведомлений")
-        except Exception as e:
-            main_logger.warning(f"⚠️ Не удалось инициализировать Telegram бот: {e}")
-        
+        if telegram_bot:
+            try:
+                from bot.services.notification_service import get_notification_service
+                get_notification_service(telegram_bot)
+            except Exception as e:
+                main_logger.warning(f"⚠️ Не удалось инициализировать сервис уведомлений: {e}")
+
+            try:
+                from bot.core.blocking_alerts import get_blocking_alerts_manager
+                get_blocking_alerts_manager(telegram_bot)
+            except Exception as e:
+                main_logger.warning(f"⚠️ Не удалось связать Telegram бот с системой блокировок: {e}")
+        else:
+            main_logger.info("📱 Telegram бот не предоставлен — уведомления отключены для текущего запуска")
+
         # Инициализируем нейронную интеграцию
         neural_integration = NeuralIntegration()
         neural_integration.load_state()
@@ -487,6 +621,8 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
         # Основной торговый цикл
         iteration_count = 0
         last_sync_time = datetime.now()
+        last_connection_state = None
+        last_connection_alert_at = datetime.min
         
         while not shutdown_event.is_set():
             try:
@@ -495,6 +631,80 @@ def run_trading_with_risk_management(risk_manager: RiskManager, shutdown_event: 
                 
                 main_logger.info(f"🔄 Итерация #{iteration_count} - {current_time.strftime('%H:%M:%S')}")
                 
+                # Проверяем состояние API подключения
+                connection_manager = get_enhanced_connection_manager()
+                if connection_manager:
+                    health = connection_manager.get_connection_health()
+                    connection_state = health.get('state', ConnectionState.HEALTHY.value)
+
+                    if connection_state != last_connection_state:
+                        if last_connection_state is not None:
+                            main_logger.info(
+                                "🌐 Состояние API: %s → %s",
+                                last_connection_state,
+                                connection_state,
+                            )
+                        else:
+                            main_logger.info("🌐 Состояние API: %s", connection_state)
+                        last_connection_state = connection_state
+                        if connection_state == ConnectionState.HEALTHY.value:
+                            last_connection_alert_at = datetime.min
+
+                    degraded_states = {
+                        ConnectionState.DEGRADED.value,
+                        ConnectionState.UNSTABLE.value,
+                        ConnectionState.FAILED.value,
+                    }
+                    if connection_state in degraded_states:
+                        now_ts = datetime.now()
+                        time_since_alert = (now_ts - last_connection_alert_at) if last_connection_alert_at != datetime.min else timedelta.max
+
+                        # Формируем подробности для алерта
+                        alert_details = {
+                            'state': connection_state,
+                            'endpoint': health.get('current_endpoint'),
+                            'response_time': round(health.get('endpoint_response_time') or 0.0, 4),
+                            'consecutive_failures': health.get('consecutive_failures'),
+                        }
+
+                        if connection_state == ConnectionState.DEGRADED.value:
+                            if time_since_alert.total_seconds() >= 120:
+                                report_order_block(
+                                    reason='api_performance',
+                                    symbol='ALL',
+                                    strategy='SYSTEM',
+                                    message='API подключение в состоянии DEGRADED — продолжение торговли с повышенной осторожностью',
+                                    details=alert_details,
+                                )
+                                last_connection_alert_at = now_ts
+                                main_logger.warning(
+                                    "⚠️ API подключение DEGRADED (response %.3fs, %s неудачных подряд)",
+                                    alert_details['response_time'],
+                                    alert_details['consecutive_failures'],
+                                )
+                        else:
+                            wait_seconds = 60 if connection_state == ConnectionState.FAILED.value else 30
+                            severity_log = main_logger.critical if connection_state == ConnectionState.FAILED.value else main_logger.warning
+                            if time_since_alert.total_seconds() >= 30:
+                                report_order_block(
+                                    reason='api_performance',
+                                    symbol='ALL',
+                                    strategy='SYSTEM',
+                                    message=f'API подключение нестабильно ({connection_state}). Торговый цикл поставлен на паузу',
+                                    details=alert_details,
+                                )
+                                last_connection_alert_at = now_ts
+                            severity_log(
+                                "🚦 API состояние %s — пауза %s сек (response %.3fs)",
+                                connection_state,
+                                wait_seconds,
+                                alert_details['response_time'],
+                            )
+                            if connection_state == ConnectionState.FAILED.value and time_since_alert.total_seconds() >= 30:
+                                global_emergency_stop.report_api_error()
+                            shutdown_event.wait(wait_seconds)
+                            continue
+
                 # Проверяем аварийный стоп
                 if risk_manager.emergency_stop:
                     main_logger.warning("⛔ Аварийный стоп активен, пропускаем итерацию")

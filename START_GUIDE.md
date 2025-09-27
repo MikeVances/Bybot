@@ -8,9 +8,6 @@
 # Интерактивный запуск с меню
 ./start_bybot.sh
 
-# Быстрый запуск
-./quick_start.sh
-
 # Прямой запуск компонентов
 python main.py                      # Полная система
 python run_enhanced_telegram_bot.py # Только Telegram бот
@@ -50,7 +47,10 @@ python main.py
 python ../test_all_strategies.py
 
 # Статус системы
-./start_bybot.sh  # выбор 5
+./start_bybot.sh  # выбор 2
+
+# Тест отправки уведомления в Telegram
+python send_test_message.py
 
 # Тест нейронной сети
 python -c "from bot.ai.neural_trader import NeuralTrader; print('Neural OK')"
@@ -126,7 +126,7 @@ journalctl -f -u bybot-trading.service
 
 ```bash
 # Остановить все
-./start_bybot.sh  # выбор 6
+./start_bybot.sh  # выбор 4
 
 # Принудительная остановка
 pkill -f "python.*main.py"
