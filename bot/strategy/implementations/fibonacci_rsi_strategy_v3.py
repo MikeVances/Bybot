@@ -213,6 +213,11 @@ def create_fib_crypto(**kwargs) -> FibonacciRSIStrategyV3:
     """Быстрое создание Fibonacci стратегии для криптовалют."""
     return FibonacciRSIStrategyV3.create_preset('fibonacci_crypto', **kwargs)
 
+# Совместимость со старыми именами
+def create_fibonacci_rsi_strategy(**kwargs) -> FibonacciRSIStrategyV3:
+    """Обратная совместимость: создание стандартной Fibonacci RSI стратегии."""
+    return FibonacciRSIStrategyV3.create_strategy(**kwargs)
+
 
 # =========================================================================
 # КОНСТАНТЫ И МЕТАДАННЫЕ

@@ -42,12 +42,12 @@ class StrategyExecutionService:
                 
                 # Маппинг названий конфигураций стратегий к файлам модулей
                 strategy_mapping = {
-                    'volume_vwap_default': 'volume_vwap_strategy',
-                    'volume_vwap_conservative': 'volume_vwap_strategy',
-                    'cumdelta_sr_default': 'cumdelta_sr_strategy',
-                    'multitf_volume_default': 'multitf_volume_strategy',
-                    'fibonacci_rsi_default': 'fibonacci_rsi_strategy',
-                    'range_trading_default': 'range_trading_strategy'
+                    'volume_vwap_default': 'volume_vwap_strategy_v3',
+                    'volume_vwap_conservative': 'volume_vwap_strategy_v3',
+                    'cumdelta_sr_default': 'cumdelta_sr_strategy_v3',
+                    'multitf_volume_default': 'multitf_volume_strategy_v3',
+                    'fibonacci_rsi_default': 'fibonacci_rsi_strategy_v3',
+                    'range_trading_default': 'range_trading_strategy_v3'
                 }
 
                 module_name = strategy_mapping.get(strategy_name, strategy_name.lower())

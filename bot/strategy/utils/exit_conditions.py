@@ -117,7 +117,7 @@ class ExitConditionsCalculator:
         }
 
         # Нормализация имени стратегии
-        normalized_strategy = strategy_type.lower().replace('strategy', '').replace('_v2', '').replace('_v1', '')
+        normalized_strategy = strategy_type.lower().replace('strategy', '').replace('_v3', '').replace('_v2', '').replace('_v1', '')
 
         checker = exit_checkers.get(normalized_strategy)
         if checker:

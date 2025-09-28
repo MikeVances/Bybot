@@ -149,27 +149,27 @@ def load_strategy(strategy_name):
         # Сначала пробуем загрузить новую архитектуру стратегий
         if strategy_name.startswith('volume_vwap'):
             # Загружаем VolumeVWAP стратегию из новой архитектуры
-            from bot.strategy.implementations.volume_vwap_strategy import create_volume_vwap_strategy
+            from bot.strategy.implementations.volume_vwap_strategy_v3 import create_volume_vwap_strategy
             logging.info(f"✅ Стратегия {strategy_name} загружена из новой архитектуры")
             return create_volume_vwap_strategy
         elif strategy_name.startswith('cumdelta'):
             # Загружаем CumDelta стратегию из новой архитектуры
-            from bot.strategy.implementations.cumdelta_sr_strategy import create_cumdelta_sr_strategy
+            from bot.strategy.implementations.cumdelta_sr_strategy_v3 import create_cumdelta_sr_strategy
             logging.info(f"✅ Стратегия {strategy_name} загружена из новой архитектуры")
             return create_cumdelta_sr_strategy
         elif strategy_name.startswith('multitf'):
             # Загружаем MultiTF стратегию из новой архитектуры
-            from bot.strategy.implementations.multitf_volume_strategy import create_multitf_volume_strategy
+            from bot.strategy.implementations.multitf_volume_strategy_v3 import create_multitf_volume_strategy
             logging.info(f"✅ Стратегия {strategy_name} загружена из новой архитектуры")
             return create_multitf_volume_strategy
         elif strategy_name.startswith('fibonacci'):
             # Загружаем Fibonacci RSI стратегию из новой архитектуры
-            from bot.strategy.implementations.fibonacci_rsi_strategy import create_fibonacci_rsi_strategy
+            from bot.strategy.implementations.fibonacci_rsi_strategy_v3 import create_fibonacci_rsi_strategy
             logging.info(f"✅ Стратегия {strategy_name} загружена из новой архитектуры")
             return create_fibonacci_rsi_strategy
         elif strategy_name.startswith('range_trading'):
             # Загружаем Range Trading стратегию из новой архитектуры
-            from bot.strategy.implementations.range_trading_strategy import create_range_trading_strategy
+            from bot.strategy.implementations.range_trading_strategy_v3 import create_range_trading_strategy
             logging.info(f"✅ Стратегия {strategy_name} загружена из новой архитектуры")
             return create_range_trading_strategy
         else:

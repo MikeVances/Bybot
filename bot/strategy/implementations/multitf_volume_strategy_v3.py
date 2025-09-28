@@ -235,6 +235,12 @@ def create_multitf_scalping(**kwargs) -> MultiTFVolumeStrategyV3:
 # КОНСТАНТЫ И МЕТАДАННЫЕ
 # =========================================================================
 
+# Совместимость со старыми именами
+def create_multitf_volume_strategy(**kwargs) -> MultiTFVolumeStrategyV3:
+    """Обратная совместимость: создание стандартной Multi-TF стратегии."""
+    return MultiTFVolumeStrategyV3.create_strategy(**kwargs)
+
+
 STRATEGY_INFO_V3 = {
     'name': 'MultiTF_Volume_v3',
     'version': '3.0.0',

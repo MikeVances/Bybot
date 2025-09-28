@@ -204,6 +204,11 @@ def create_cumdelta_institutional(**kwargs) -> CumDeltaSRStrategyV3:
     """Быстрое создание институциональной версии CumDelta стратегии."""
     return CumDeltaSRStrategyV3.create_preset('institutional', **kwargs)
 
+# Совместимость со старыми именами
+def create_cumdelta_sr_strategy(**kwargs) -> CumDeltaSRStrategyV3:
+    """Обратная совместимость: создание стандартной CumDelta стратегии."""
+    return CumDeltaSRStrategyV3.create_strategy(**kwargs)
+
 
 # =========================================================================
 # КОНСТАНТЫ И МЕТАДАННЫЕ

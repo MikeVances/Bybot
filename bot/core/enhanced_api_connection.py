@@ -34,10 +34,15 @@ class APIEndpoint:
 class EnhancedAPIConnectionManager:
     """Менеджер улучшенного подключения к API"""
 
-    def __init__(self, primary_session, base_url: Optional[str] = None, backup_endpoints: List[str] = None):
+    def __init__(self, primary_session, base_url: Optional[str] = None, backup_endpoints: List[str] = None,
+                 healthy_threshold: float = 1.0, degraded_threshold: float = 3.0):
         self.primary_session = primary_session
         self.logger = logging.getLogger('api_connection')
         self._lock = threading.RLock()
+
+        # Настраиваемые пороги производительности
+        self.healthy_threshold = healthy_threshold    # По умолчанию 1.0с вместо 0.5с
+        self.degraded_threshold = degraded_threshold  # По умолчанию 3.0с вместо 2.0с
 
         # Настройка endpoints
         primary_url = base_url or getattr(primary_session, 'BASE_URL', None) or getattr(primary_session, 'endpoint', None) or "https://api.bybit.com"
@@ -123,10 +128,10 @@ class EnhancedAPIConnectionManager:
                     current_endpoint.avg_response_time * 0.7 + response_time * 0.3
                 )
 
-                # Обновляем состояние подключения
-                if response_time < 0.5:
+                # Обновляем состояние подключения на основе настраиваемых порогов
+                if response_time < self.healthy_threshold:
                     self._update_connection_state(ConnectionState.HEALTHY)
-                elif response_time < 2.0:
+                elif response_time < self.degraded_threshold:
                     self._update_connection_state(ConnectionState.DEGRADED)
                 else:
                     self._update_connection_state(ConnectionState.UNSTABLE)
@@ -416,8 +421,15 @@ def get_enhanced_connection_manager() -> Optional[EnhancedAPIConnectionManager]:
     global _connection_manager
     return _connection_manager
 
-def setup_enhanced_connection_manager(primary_session, base_url: Optional[str] = None, backup_endpoints=None):
-    """Настройка менеджера подключений"""
+def setup_enhanced_connection_manager(primary_session, base_url: Optional[str] = None, backup_endpoints=None,
+                                     healthy_threshold: float = 1.0, degraded_threshold: float = 3.0):
+    """Настройка менеджера подключений с настраиваемыми порогами производительности"""
     global _connection_manager
-    _connection_manager = EnhancedAPIConnectionManager(primary_session, base_url=base_url, backup_endpoints=backup_endpoints)
+    _connection_manager = EnhancedAPIConnectionManager(
+        primary_session,
+        base_url=base_url,
+        backup_endpoints=backup_endpoints,
+        healthy_threshold=healthy_threshold,
+        degraded_threshold=degraded_threshold
+    )
     return _connection_manager

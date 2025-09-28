@@ -313,14 +313,9 @@ class TelegramBot:
             return
         """Показать статус всех стратегий"""
         try:
-            # Используем новые стратегии вместо старых
-            strategy_names = [
-                'VolumeVWAP_v2',
-                'CumDelta_SR_v2', 
-                'MultiTF_Volume_v2',
-                'VolumeVWAP_v2_conservative',
-                'FibonacciRSI'
-            ]
+            # Динамически загружаем список активных стратегий
+            from bot.core.trader import get_active_strategies
+            strategy_names = get_active_strategies()
             status_text = f"🎯 *Статус всех стратегий (новая архитектура):*\n\n⏰ Обновлено: {datetime.now().strftime('%H:%M:%S')}\n\n"
             
             for strategy_name in strategy_names:
@@ -422,15 +417,26 @@ class TelegramBot:
             return
         """Показать активность и состояние всех стратегий"""
         try:
-            # Используем правильные имена файлов логов
-            strategy_logs = [
-                ('VolumeVWAP_v2', 'volume_vwap_default.log'),
-                ('CumDelta_SR_v2', 'cumdelta_sr_default.log'),
-                ('MultiTF_Volume_v2', 'multitf_volume_default.log'),
-                ('VolumeVWAP_v2_conservative', 'volume_vwap_conservative.log'),
-                ('FibonacciRSI', 'fibonacci_rsi_default.log'),
-                ('RangeTrading_v1', 'range_trading_default.log')
-            ]
+            # Динамически загружаем список активных стратегий
+            from bot.core.trader import get_active_strategies
+            active_strategy_names = get_active_strategies()
+
+            # Формируем список логов на основе активных стратегий
+            strategy_logs = []
+            for strategy_name in active_strategy_names:
+                # Преобразуем имя файла лога
+                log_filename = f"{strategy_name}.log"
+
+                # Создаем красивое отображаемое имя
+                display_name = strategy_name.replace('_', ' ').title()
+                if 'default' in strategy_name.lower():
+                    display_name = display_name.replace(' Default', '_v3')
+                elif 'conservative' in strategy_name.lower():
+                    display_name = display_name.replace(' Conservative', '_v3_Conservative')
+                else:
+                    display_name += '_v3'
+
+                strategy_logs.append((display_name, log_filename))
 
             logs_text = f"📊 АКТИВНОСТЬ СТРАТЕГИЙ\n\n⏰ Обновлено: {datetime.now().strftime('%H:%M:%S')}\n\n"
 
@@ -439,94 +445,127 @@ class TelegramBot:
             strategies_with_signals = 0
             strategies_with_errors = 0
 
-            for strategy_name, log_filename in strategy_logs:
-                # Формируем полный путь к файлу лога
-                log_file = f"data/logs/strategies/{log_filename}"
+            # Читаем логи v3 стратегий из full_system.log
+            main_log_file = "full_system.log"
+            strategy_activities = {}
 
-                if os.path.exists(log_file):
-                    try:
-                        with open(log_file, 'r', encoding='utf-8') as f:
-                            lines = f.readlines()
+            if os.path.exists(main_log_file):
+                try:
+                    with open(main_log_file, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
 
-                        if lines:
-                            active_strategies += 1
+                    # Анализируем последние 200 строк для активности v3 стратегий
+                    recent_lines = lines[-200:] if len(lines) > 200 else lines
 
-                            # Ищем важные события в последних 10 строках
-                            recent_lines = lines[-10:]
+                    for line in recent_lines:
+                        # Ищем логи v3 стратегий (более гибкий поиск)
+                        if ('strategy.' in line and ('_v3:' in line or 'v3.0' in line)) or \
+                           ('INFO:strategy' in line and any(name in line for name in ['volumevwap', 'cumdelta', 'multitf', 'fibonacci', 'range'])):
+                            # Извлекаем имя стратегии (универсальный поиск)
+                            strategy_key = None
+                            if 'volumevwap' in line.lower():
+                                if 'conservative' in line.lower():
+                                    strategy_key = 'volume_vwap_conservative'
+                                else:
+                                    strategy_key = 'volume_vwap_default'
+                            elif 'cumdelta' in line.lower():
+                                strategy_key = 'cumdelta_sr_default'
+                            elif 'multitf' in line.lower():
+                                strategy_key = 'multitf_volume_default'
+                            elif 'fibonacci' in line.lower():
+                                strategy_key = 'fibonacci_rsi_default'
+                            elif 'range' in line.lower():
+                                strategy_key = 'range_trading_default'
+
+                            if not strategy_key:
+                                continue
+
+                            if strategy_key not in strategy_activities:
+                                strategy_activities[strategy_key] = {
+                                    'signals': [],
+                                    'errors': [],
+                                    'warnings': [],
+                                    'last_activity': None,
+                                    'is_active': False
+                                }
+
+                            strategy_activities[strategy_key]['is_active'] = True
+                            strategy_activities[strategy_key]['last_activity'] = line
 
                             # Анализируем типы событий
-                            signals = []
-                            errors = []
-                            warnings = []
+                            if 'Сигнал:' in line and ('BUY' in line or 'SELL' in line):
+                                if 'BUY' in line:
+                                    strategy_activities[strategy_key]['signals'].append('🟢 BUY')
+                                elif 'SELL' in line:
+                                    strategy_activities[strategy_key]['signals'].append('🔴 SELL')
+                            elif 'ERROR' in line:
+                                if 'БЛОКИРОВКА ПО БАЛАНСУ' in line:
+                                    strategy_activities[strategy_key]['errors'].append('💰 Нет баланса')
+                                elif 'Недостаточно баланса' in line:
+                                    strategy_activities[strategy_key]['errors'].append('💰 Мало средств')
+                                else:
+                                    strategy_activities[strategy_key]['errors'].append('❌ Ошибка')
+                            elif 'WARNING' in line:
+                                if 'Недостаточно средств' in line:
+                                    strategy_activities[strategy_key]['warnings'].append('💸 $0.00')
+                                else:
+                                    strategy_activities[strategy_key]['warnings'].append('⚠️ Предупреждение')
 
-                            for line in recent_lines:
-                                line_clean = line.strip()
-                                if 'Сигнал:' in line and ('BUY' in line or 'SELL' in line):
-                                    # Извлекаем сигнал
-                                    if 'BUY' in line:
-                                        signals.append('🟢 BUY')
-                                    elif 'SELL' in line:
-                                        signals.append('🔴 SELL')
-                                elif 'ERROR' in line:
-                                    # Извлекаем суть ошибки
-                                    if 'БЛОКИРОВКА ПО БАЛАНСУ' in line:
-                                        errors.append('💰 Нет баланса')
-                                    elif 'Недостаточно баланса' in line:
-                                        errors.append('💰 Мало средств')
-                                    else:
-                                        errors.append('❌ Ошибка')
-                                elif 'WARNING' in line:
-                                    if 'Недостаточно средств' in line:
-                                        warnings.append('💸 $0.00')
-                                    else:
-                                        warnings.append('⚠️ Предупреждение')
+                except Exception as e:
+                    pass
 
-                            # Формируем краткий отчет
-                            strategy_short = strategy_name.replace('_v2', '').replace('_v1', '')
-                            logs_text += f"📊 {strategy_short}:\n"
+            for strategy_name, log_filename in strategy_logs:
+                # Извлекаем ключ стратегии для поиска в активности
+                strategy_key = log_filename.replace('.log', '')
 
-                            # Показываем последние сигналы
-                            if signals:
-                                strategies_with_signals += 1
-                                unique_signals = list(set(signals))
-                                logs_text += f"   🎯 Сигналы: {' '.join(unique_signals[:2])}\n"
+                if strategy_key in strategy_activities:
+                    activity = strategy_activities[strategy_key]
+                    active_strategies += 1
 
-                            # Показываем проблемы
-                            if errors:
-                                strategies_with_errors += 1
-                                unique_errors = list(set(errors))
-                                logs_text += f"   ⚠️ Проблемы: {unique_errors[0]}\n"
-                            elif warnings:
-                                unique_warnings = list(set(warnings))
-                                logs_text += f"   💭 Статус: {unique_warnings[0]}\n"
+                    signals = activity['signals']
+                    errors = activity['errors']
+                    warnings = activity['warnings']
 
-                            # Показываем время последней активности
-                            last_line = lines[-1].strip()
-                            if last_line:
-                                try:
-                                    # Извлекаем timestamp из лога (формат: 2025-09-22 07:21:11,819)
-                                    import re
-                                    time_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', last_line)
-                                    if time_match:
-                                        time_str = time_match.group(1).split(' ')[1][:5]  # HH:MM
-                                        logs_text += f"   🕐 Последняя активность: {time_str}\n"
-                                except:
-                                    pass
+                    # Формируем краткий отчет
+                    strategy_short = strategy_name.replace('_v3', '').replace('_v2', '').replace('_v1', '')
+                    logs_text += f"📊 {strategy_short}:\n"
 
-                            logs_text += "\n"
-                        else:
-                            logs_text += f"📊 {strategy_name}:\n"
-                            logs_text += f"   📭 Лог пуст\n\n"
-                    except Exception as e:
-                        logs_text += f"📊 {strategy_name}:\n"
-                        logs_text += f"   ❌ Ошибка чтения: {str(e)[:30]}...\n\n"
+                    # Показываем последние сигналы
+                    if signals:
+                        strategies_with_signals += 1
+                        unique_signals = list(set(signals))
+                        logs_text += f"   🎯 Сигналы: {' '.join(unique_signals[:2])}\n"
+
+                    # Показываем проблемы
+                    if errors:
+                        strategies_with_errors += 1
+                        unique_errors = list(set(errors))
+                        logs_text += f"   ⚠️ Проблемы: {unique_errors[0]}\n"
+                    elif warnings:
+                        unique_warnings = list(set(warnings))
+                        logs_text += f"   💭 Статус: {unique_warnings[0]}\n"
+
+                    # Показываем время последней активности (из v3 логов)
+                    if activity['last_activity']:
+                        try:
+                            # Извлекаем timestamp из v3 лога (формат INFO:strategy.volumevwap_v3:...)
+                            import re
+                            last_activity_line = activity['last_activity']
+                            logs_text += f"   ✅ v3 стратегия активна\n"
+                        except:
+                            pass
+                    else:
+                        logs_text += f"   💤 Нет активности v3\n"
+
+                    logs_text += "\n"
                 else:
+                    # Стратегия не найдена в v3 логах
                     logs_text += f"📊 {strategy_name}:\n"
-                    logs_text += f"   📭 Файл лога не найден\n\n"
+                    logs_text += f"   📭 Стратегия v3 не активна\n\n"
 
             # Добавляем общую аналитику
             logs_text += f"📈 ОБЩАЯ СТАТИСТИКА:\n"
-            logs_text += f"✅ Активных стратегий: {active_strategies}/6\n"
+            logs_text += f"✅ Активных стратегий: {active_strategies}/{len(strategy_logs)}\n"
             logs_text += f"🎯 С сигналами: {strategies_with_signals}\n"
             logs_text += f"⚠️ С проблемами: {strategies_with_errors}\n"
 

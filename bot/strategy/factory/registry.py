@@ -7,11 +7,11 @@ class StrategyRegistry:
     """Хранилище соответствий стратегий и их конфигураций."""
 
     _strategy_classes: Dict[str, str] = {
-        'volume_vwap': 'bot.strategy.implementations.volume_vwap_strategy:VolumeVWAPStrategy',
-        'cumdelta_sr': 'bot.strategy.implementations.cumdelta_sr_strategy:CumDeltaSRStrategy',
-        'multitf_volume': 'bot.strategy.implementations.multitf_volume_strategy:MultiTFVolumeStrategy',
-        'fibonacci_rsi': 'bot.strategy.implementations.fibonacci_rsi_strategy:FibonacciRSIStrategy',
-        'range_trading': 'bot.strategy.implementations.range_trading_strategy:RangeTradingStrategy',
+        'volume_vwap': 'bot.strategy.implementations.volume_vwap_strategy_v3:VolumeVWAPStrategyV3',
+        'cumdelta_sr': 'bot.strategy.implementations.cumdelta_sr_strategy_v3:CumDeltaSRStrategyV3',
+        'multitf_volume': 'bot.strategy.implementations.multitf_volume_strategy_v3:MultiTFVolumeStrategyV3',
+        'fibonacci_rsi': 'bot.strategy.implementations.fibonacci_rsi_strategy_v3:FibonacciRSIStrategyV3',
+        'range_trading': 'bot.strategy.implementations.range_trading_strategy_v3:RangeTradingStrategyV3',
     }
 
     _config_classes: Dict[str, str] = {

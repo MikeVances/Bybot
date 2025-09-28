@@ -241,6 +241,11 @@ def create_vwap_scalping(**kwargs) -> VolumeVWAPStrategyV3:
     """Быстрое создание скальпинговой VWAP стратегии."""
     return VolumeVWAPStrategyV3.create_preset('scalping', **kwargs)
 
+# Совместимость со старыми именами
+def create_volume_vwap_strategy(**kwargs) -> VolumeVWAPStrategyV3:
+    """Обратная совместимость: создание стандартной VWAP стратегии."""
+    return VolumeVWAPStrategyV3.create_strategy(**kwargs)
+
 
 # =========================================================================
 # КОНСТАНТЫ И МЕТАДАННЫЕ
