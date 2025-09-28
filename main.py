@@ -27,38 +27,38 @@ from bot.config_manager import config
 from bot.risk import RiskManager
 from bot.monitoring.metrics_exporter import MetricsExporter
 
-# Импорты новой архитектуры стратегий
+# Импорты РЕФАКТОРИРОВАННЫХ стратегий v3.0
 from bot.strategy.base import (
-    BaseStrategy, 
+    BaseStrategy,
     VolumeVWAPConfig,
     CumDeltaConfig,
     MultiTFConfig,
     get_version_info,
     validate_imports
 )
-from bot.strategy.implementations.volume_vwap_strategy import (
-    VolumeVWAPStrategy,
-    create_volume_vwap_strategy,
-    create_conservative_volume_vwap,
-    create_aggressive_volume_vwap
+from bot.strategy.implementations.volume_vwap_strategy_v3 import (
+    VolumeVWAPStrategyV3,
+    create_vwap_crypto_stable as create_volume_vwap_strategy,
+    create_vwap_crypto_stable as create_conservative_volume_vwap,
+    create_vwap_crypto_volatile as create_aggressive_volume_vwap
 )
-from bot.strategy.implementations.cumdelta_sr_strategy import (
-    CumDeltaSRStrategy,
-    create_cumdelta_sr_strategy,
-    create_conservative_cumdelta_sr,
-    create_aggressive_cumdelta_sr
+from bot.strategy.implementations.cumdelta_sr_strategy_v3 import (
+    CumDeltaSRStrategyV3,
+    create_cumdelta_swing as create_cumdelta_sr_strategy,
+    create_cumdelta_institutional as create_conservative_cumdelta_sr,
+    create_cumdelta_scalping as create_aggressive_cumdelta_sr
 )
-from bot.strategy.implementations.multitf_volume_strategy import (
-    MultiTFVolumeStrategy,
-    create_multitf_volume_strategy,
-    create_conservative_multitf_volume,
-    create_aggressive_multitf_volume
+from bot.strategy.implementations.multitf_volume_strategy_v3 import (
+    MultiTFVolumeStrategyV3,
+    create_multitf_trend_following as create_multitf_volume_strategy,
+    create_multitf_swing as create_conservative_multitf_volume,
+    create_multitf_breakout as create_aggressive_multitf_volume
 )
-from bot.strategy.implementations.fibonacci_rsi_strategy import (
-    FibonacciRSIStrategy,
-    create_fibonacci_rsi_strategy,
-    create_conservative_fibonacci_rsi,
-    create_aggressive_fibonacci_rsi
+from bot.strategy.implementations.fibonacci_rsi_strategy_v3 import (
+    FibonacciRSIStrategyV3,
+    create_fib_swing as create_fibonacci_rsi_strategy,
+    create_fib_crypto as create_conservative_fibonacci_rsi,
+    create_fib_scalping as create_aggressive_fibonacci_rsi
 )
 
 # Настройка логирования с улучшенным форматированием
@@ -150,7 +150,7 @@ class StrategyManager:
                     elif strategy_name == 'fibonacci_rsi_aggressive':
                         strategy_instance = create_aggressive_fibonacci_rsi()
                     elif strategy_name == 'range_trading_default':
-                        from bot.strategy.implementations.range_trading_strategy import create_range_trading_strategy
+                        from bot.strategy.implementations.range_trading_strategy_v3 import create_range_trading_strategy
                         strategy_instance = create_range_trading_strategy()
                     else:
                         self.logger.warning(f"⚠️ Неизвестная стратегия '{strategy_name}', пропускаем")

@@ -1,6 +1,5 @@
 # bot/services/telegram_bot.py
 import logging
-import nest_asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -8,9 +7,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
-
-# Разрешить вложенные event loops для совместимости с интерактивными средами
-nest_asyncio.apply()
 from bot.exchange.api_adapter import create_trading_bot_adapter
 from bot.exchange.bybit_api_v5 import BybitAPIV5
 from bot.cli import load_active_strategy, save_active_strategy
@@ -2066,14 +2062,28 @@ class TelegramBot:
                 )
 
             loop = self._loop
-            if loop and loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(send_message(), loop)
+            if loop and not loop.is_closed():
                 try:
+                    future = asyncio.run_coroutine_threadsafe(send_message(), loop)
                     future.result(timeout=10)
                 except Exception as send_exc:
-                    print(f"[ERROR] Ошибка отправки сообщения: {send_exc}")
+                    print(f"[ERROR] Ошибка отправки сообщения через threadsafe: {send_exc}")
             else:
-                asyncio.run(send_message())
+                # Безопасная отправка без конфликта event loops
+                try:
+                    import threading
+                    if threading.current_thread() == threading.main_thread():
+                        # В главном потоке безопасно создаем новый loop
+                        new_loop = asyncio.new_event_loop()
+                        try:
+                            new_loop.run_until_complete(send_message())
+                        finally:
+                            new_loop.close()
+                    else:
+                        # В другом потоке используем run()
+                        asyncio.run(send_message())
+                except Exception as fallback_exc:
+                    print(f"[ERROR] Ошибка fallback отправки: {fallback_exc}")
 
         except Exception as e:
             print(f"[ERROR] Ошибка send_admin_message: {e}")
@@ -2196,26 +2206,45 @@ class TelegramBot:
 
         def thread_worker():
             # Создаем новый event loop для потока
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            self._loop = loop
             try:
-                async def run_bot():
-                    print("[DEBUG] Начинаем polling с обработкой команд...")
-                    print(f"[DEBUG] Токен длина: {len(self.token) if self.token else 'None'}")
-                    print(f"[DEBUG] Обработчики зарегистрированы: {len(self.app.handlers)}")
-                    await self.app.run_polling(drop_pending_updates=False, stop_signals=None)
-                print("[DEBUG] Запускаем run_bot() в event loop...")
-                loop.run_until_complete(run_bot())
-                print("[DEBUG] run_bot() завершен")
+                # Убеждаемся что в потоке нет активного loop
+                try:
+                    current_loop = asyncio.get_running_loop()
+                    print("[DEBUG] Обнаружен активный loop, останавливаем...")
+                    current_loop.stop()
+                except RuntimeError:
+                    # Нет активного loop - это нормально
+                    pass
+
+                # Создаем новый loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self._loop = loop
+
+                print("[DEBUG] Начинаем polling с обработкой команд...")
+                print(f"[DEBUG] Токен длина: {len(self.token) if self.token else 'None'}")
+                print(f"[DEBUG] Обработчики зарегистрированы: {len(self.app.handlers)}")
+
+                # Используем простой run вместо run_until_complete
+                asyncio.run(self.app.run_polling(drop_pending_updates=False, stop_signals=None))
+                print("[DEBUG] Polling завершен")
+
             except Exception as e:
                 print(f"[ERROR] Ошибка в thread_worker: {e}")
                 import traceback
                 traceback.print_exc()
             finally:
-                loop.close()
-                self._loop = None
-                self._is_running = False
+                # Безопасное закрытие loop
+                try:
+                    if self._loop and not self._loop.is_closed():
+                        # Не закрываем running loop принудительно
+                        if not self._loop.is_running():
+                            self._loop.close()
+                except Exception as close_e:
+                    print(f"[DEBUG] Ошибка закрытия loop: {close_e}")
+                finally:
+                    self._loop = None
+                    self._is_running = False
 
         # Запускаем в отдельном потоке
         thread = threading.Thread(target=thread_worker, daemon=True)

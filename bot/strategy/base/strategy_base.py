@@ -224,10 +224,17 @@ class BaseStrategy(ABC, PositionManagerMixin, StatisticsMixin, PriceUtilsMixin,
                         return df
             
             return None
-            
+
         except Exception as e:
             self.logger.error(f"Ошибка получения основного DataFrame: {e}")
             return None
+
+    def calculate_atr_safe(self, df: pd.DataFrame, period: int = 14):
+        """
+        Обратная совместимость: делегирует вызов TechnicalIndicators.calculate_atr_safe
+        """
+        from ..utils.indicators import TechnicalIndicators
+        return TechnicalIndicators.calculate_atr_safe(df, period)
     
     def calculate_base_indicators(self, df: pd.DataFrame) -> Dict[str, Any]:
         """
