@@ -30,10 +30,12 @@ try:
                     hasattr(attr, 'strategy_type')):
 
                     strategy_classes[attr_name] = attr
-                    print(f"✅ Загружена стратегия: {attr_name}")
+                    import logging
+                    logging.debug(f"✅ Загружена стратегия: {attr_name}")
 
         except ImportError as e:
-            print(f"⚠️ Не удалось загрузить {module_name}: {e}")
+            import logging
+            logging.warning(f"⚠️ Не удалось загрузить {module_name}: {e}")
 
     # Создаем алиасы для совместимости
     VolumeVWAP = strategy_classes.get('VolumeVWAPStrategyV3')
@@ -42,7 +44,8 @@ try:
     FibonacciRSI = strategy_classes.get('FibonacciRSIStrategyV3')
     RangeTrading = strategy_classes.get('RangeTradingStrategyV3')
 
-    print(f"🎯 Динамически загружено {len(strategy_classes)} стратегий v3")
+    import logging
+    logging.info(f"🎯 Динамически загружено {len(strategy_classes)} стратегий v3")
 
 except ImportError as e:
     # Fallback на MVP стратегию если импорт не удался
@@ -50,5 +53,41 @@ except ImportError as e:
     logging.getLogger(__name__).warning(f"Не удалось импортировать стратегии: {e}, используем MVP")
     from .simple_mvp_strategy import SimpleMVPStrategy, VolumeVWAP, CumDeltaSR, MultiTFVolume
 
-# Экспорт основных классов
-__all__ = ['VolumeVWAP', 'CumDeltaSR', 'MultiTFVolume', 'FibonacciRSI', 'RangeTrading']
+# Фабричные функции для обратной совместимости с v2 API
+def create_volume_vwap_strategy(config=None):
+    """Создание Volume VWAP стратегии (обратная совместимость)"""
+    if VolumeVWAP:
+        return VolumeVWAP.create_strategy(config or {})
+    return None
+
+def create_cumdelta_sr_strategy(config=None):
+    """Создание CumDelta SR стратегии (обратная совместимость)"""
+    if CumDeltaSR:
+        return CumDeltaSR.create_strategy(config or {})
+    return None
+
+def create_multitf_volume_strategy(config=None):
+    """Создание MultiTF Volume стратегии (обратная совместимость)"""
+    if MultiTFVolume:
+        return MultiTFVolume.create_strategy(config or {})
+    return None
+
+def create_fibonacci_rsi_strategy(config=None):
+    """Создание Fibonacci RSI стратегии (обратная совместимость)"""
+    if FibonacciRSI:
+        return FibonacciRSI.create_strategy(config or {})
+    return None
+
+def create_range_trading_strategy(config=None):
+    """Создание Range Trading стратегии (обратная совместимость)"""
+    if RangeTrading:
+        return RangeTrading.create_strategy(config or {})
+    return None
+
+# Экспорт основных классов и функций
+__all__ = [
+    'VolumeVWAP', 'CumDeltaSR', 'MultiTFVolume', 'FibonacciRSI', 'RangeTrading',
+    'create_volume_vwap_strategy', 'create_cumdelta_sr_strategy',
+    'create_multitf_volume_strategy', 'create_fibonacci_rsi_strategy',
+    'create_range_trading_strategy'
+]

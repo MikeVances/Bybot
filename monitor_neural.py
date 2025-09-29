@@ -19,7 +19,8 @@ def check_neural_files():
         'config': 'bot/strategy/active_strategies.txt',
         'state': 'data/neural_state.json',
         'bets': 'data/neural_bets.json',
-        'logs': 'full_system.log'
+        'logs': 'full_system.log',
+        'main_log': 'trading_bot.log'  # Альтернативный лог файл
     }
 
     status = {}
@@ -39,14 +40,22 @@ def check_neural_files():
 
 def check_neural_logs():
     """Проверка логов нейромодуля"""
-    try:
-        with open('full_system.log', 'r') as f:
-            lines = f.readlines()
+    # Проверяем оба возможных лог файла
+    log_files = ['full_system.log', 'trading_bot.log']
 
-        neural_lines = [line for line in lines[-100:] if '🧠' in line or 'neural' in line.lower()]
-        return neural_lines[-5:] if neural_lines else []
-    except:
-        return []
+    for log_file in log_files:
+        try:
+            if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
+                with open(log_file, 'r') as f:
+                    lines = f.readlines()
+
+                neural_lines = [line for line in lines[-100:] if '🧠' in line or 'neural' in line.lower()]
+                if neural_lines:
+                    return neural_lines[-5:]
+        except:
+            continue
+
+    return []
 
 def check_neural_integration():
     """Проверка интеграции нейромодуля"""

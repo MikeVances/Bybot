@@ -94,18 +94,52 @@ class StrategyExecutionService:
             strategy_module = strategy_info['module']
             config = strategy_info['config']
             
-            # Проверяем, есть ли функция execute_strategy в модуле
-            if not hasattr(strategy_module, 'execute_strategy'):
-                self.logger.error(f"❌ В стратегии {strategy_name} нет функции execute_strategy")
-                return None
-            
-            # Выполняем стратегию
-            signal = strategy_module.execute_strategy(
-                market_data=market_data,
-                balance=balance,
-                config=config,
-                bot_state=state
-            )
+            # Поддержка v3 стратегий (классовая архитектура) и v2 (функциональная)
+            if hasattr(strategy_module, 'execute_strategy'):
+                # Старый v2 API - функция execute_strategy
+                signal = strategy_module.execute_strategy(
+                    market_data=market_data,
+                    balance=balance,
+                    config=config,
+                    bot_state=state
+                )
+            else:
+                # Новый v3 API - классовая архитектура
+                # Ищем класс стратегии в модуле
+                strategy_class = None
+                for attr_name in dir(strategy_module):
+                    attr = getattr(strategy_module, attr_name)
+                    if (isinstance(attr, type) and
+                        hasattr(attr, 'analyze') and
+                        attr_name.endswith('V3')):
+                        strategy_class = attr
+                        break
+
+                if strategy_class is None:
+                    self.logger.error(f"❌ В стратегии {strategy_name} нет v3 класса или execute_strategy функции")
+                    return None
+
+                # Создаем экземпляр v3 стратегии и выполняем анализ
+                try:
+                    strategy_instance = strategy_class.create_strategy(config)
+                    # Конвертируем market_data в DataFrame если нужно
+                    if isinstance(market_data, dict) and 'klines' in market_data:
+                        import pandas as pd
+                        df = pd.DataFrame(market_data['klines'])
+                        if not df.empty:
+                            # Стандартизируем колонки
+                            if 'timestamp' in df.columns:
+                                df.set_index('timestamp', inplace=True)
+                            signal = strategy_instance.analyze(df, market_data.get('symbol', 'BTCUSDT'))
+                        else:
+                            signal = None
+                    else:
+                        # Предполагаем что market_data уже DataFrame
+                        signal = strategy_instance.analyze(market_data, 'BTCUSDT')
+
+                except Exception as e:
+                    self.logger.error(f"❌ Ошибка создания v3 стратегии {strategy_name}: {e}")
+                    return None
 
             if signal:
                 if 'signal_type' not in signal and 'signal' in signal:
