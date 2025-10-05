@@ -3,10 +3,10 @@
 Главный файл торгового бота с многопоточностью и централизованным риск-менеджментом
 Версия 2.0 с интеграцией новой архитектуры стратегий
 
-Функции: 
+Функции:
 - Запуск торгового цикла с новыми стратегиями
 - Telegram бот для управления
-- Мониторинг рисков 
+- Мониторинг рисков
 - Обработка сигналов завершения
 - Менеджер стратегий
 """
@@ -20,7 +20,18 @@ import traceback
 from datetime import datetime
 from typing import Dict, List, Optional
 
-# Импорты основных компонентов бота
+# ⚠️ КРИТИЧНО: Настройка логирования ПЕРЕД всеми импортами!
+# Любой импорт может вызвать logging.getLogger(), что создаст дефолтную конфигурацию
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.FileHandler('trading_bot.log'),  # Единый лог для всего бота
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+# Импорты основных компонентов бота (ПОСЛЕ настройки логирования!)
 from bot.core import run_trading_with_risk_management
 from bot.services.telegram_bot import TelegramBot
 from bot.config_manager import config
@@ -61,16 +72,7 @@ from bot.strategy.implementations.fibonacci_rsi_strategy_v3 import (
     create_fib_scalping as create_aggressive_fibonacci_rsi
 )
 
-# Настройка логирования с улучшенным форматированием
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.FileHandler('trading_bot.log'),  # Единый лог для всего бота
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
+# Логирование уже настроено в начале файла
 logger = logging.getLogger(__name__)
 
 # Глобальные объекты для доступа из обработчиков сигналов
@@ -379,13 +381,50 @@ def start_metrics_monitoring():
 def start_risk_monitoring():
     """Запуск мониторинга рисков (отдельный поток)"""
     logger.info('=== Поток мониторинга рисков стартовал ===')
-    
+
+    # Счетчик для reconciliation (каждые 5 минут)
+    reconciliation_counter = 0
+
     try:
         while not shutdown_event.is_set():
             if risk_manager and strategy_manager:
                 # Очищаем старые данные каждый час
                 risk_manager.cleanup_old_data()
-                
+
+                # КРИТИЧНО: Position reconciliation каждые 5 минут
+                reconciliation_counter += 1
+                if reconciliation_counter >= 1:  # Каждую итерацию (5 минут)
+                    reconciliation_counter = 0
+                    try:
+                        # Получаем API клиент из первой активной стратегии
+                        from bot.exchange.api_adapter import create_trading_bot_adapter
+                        from config import get_strategy_config
+
+                        active_strategies = strategy_manager.get_active_strategies()
+                        if active_strategies:
+                            first_strategy_name = strategy_manager.active_strategies[0]
+                            config = get_strategy_config(first_strategy_name)
+                            api_client = create_trading_bot_adapter(
+                                'BTCUSDT',
+                                config['api_key'],
+                                config['api_secret'],
+                                config.get('uid')
+                            )
+
+                            # Запускаем reconciliation
+                            reconcile_result = risk_manager.reconcile_positions(api_client, telegram_bot)
+
+                            if not reconcile_result['success']:
+                                logger.error(f"⚠️ Position reconciliation failed: {reconcile_result['errors']}")
+                            elif reconcile_result['orphaned_positions'] > 0 or reconcile_result['missing_positions'] > 0:
+                                logger.warning(
+                                    f"⚠️ Position reconciliation обнаружил расхождения: "
+                                    f"orphaned={reconcile_result['orphaned_positions']}, "
+                                    f"missing={reconcile_result['missing_positions']}"
+                                )
+                    except Exception as e:
+                        logger.error(f"Ошибка в position reconciliation: {e}", exc_info=True)
+
                 # Проверяем критические события
                 risk_report = risk_manager.get_risk_report()
                 strategy_info = strategy_manager.get_strategy_info()

@@ -17,14 +17,40 @@ class SingletonManager:
         atexit.register(self.cleanup)
 
     def acquire_lock(self, name: str) -> bool:
-        """Получить эксклюзивную блокировку для компонента"""
+        """
+        Получить эксклюзивную блокировку для компонента
+
+        КРИТИЧНО: Проверяет stale locks от крашнутых процессов
+        """
         lock_file = os.path.join(self._lock_dir, f"{name}.lock")
 
+        # 1. Проверяем существующий lock файл
+        if os.path.exists(lock_file):
+            try:
+                with open(lock_file, 'r') as f:
+                    old_pid = f.read().strip()
+
+                if old_pid.isdigit():
+                    old_pid_int = int(old_pid)
+
+                    # Проверяем, жив ли процесс
+                    if not self._is_process_alive(old_pid_int):
+                        # Процесс мертв - удаляем stale lock
+                        os.unlink(lock_file)
+                        print(f"🧹 Удален stale lock от крашнутого процесса PID {old_pid_int}")
+            except Exception as e:
+                # Если не можем прочитать - попробуем удалить
+                try:
+                    os.unlink(lock_file)
+                except:
+                    pass
+
         try:
+            # 2. Создаем новый lock
             fd = os.open(lock_file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-            # Записываем PID
+            # 3. Записываем PID текущего процесса
             os.write(fd, str(os.getpid()).encode())
             os.fsync(fd)
 
@@ -32,6 +58,19 @@ class SingletonManager:
             return True
 
         except (OSError, BlockingIOError):
+            # Lock все еще занят живым процессом
+            return False
+
+    def _is_process_alive(self, pid: int) -> bool:
+        """
+        Проверка, жив ли процесс
+
+        Использует kill(pid, 0) - не убивает, просто проверяет существование
+        """
+        try:
+            os.kill(pid, 0)  # Сигнал 0 = проверка без убийства
+            return True
+        except OSError:
             return False
 
     def release_lock(self, name: str):

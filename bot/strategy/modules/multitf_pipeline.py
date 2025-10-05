@@ -19,6 +19,17 @@ from bot.strategy.pipeline.common import (
 from bot.strategy.utils.indicators import TechnicalIndicators
 
 
+# ✅ NEW: Market Context Engine
+try:
+    from bot.market_context import MarketContextEngine
+    MARKET_CONTEXT_AVAILABLE = True
+except ImportError:
+    MARKET_CONTEXT_AVAILABLE = False
+    import logging
+    logging.getLogger(__name__).warning("Market Context Engine not available for multitf_volume strategy")
+
+
+
 @dataclass
 class MultiTFContext:
     fast_tf: str
@@ -36,6 +47,16 @@ class MultiTFContext:
     min_risk_reward_ratio: float
     momentum_analysis: bool
     mtf_divergence_detection: bool
+
+
+
+
+    # ✅ NEW: Market Context parameters (специфично для multitf_volume)
+    use_market_context: bool = True
+    use_market_context: bool = True  # 
+    use_session_filtering: bool = True  # 
+    require_tf_regime_match: bool = True  # 
+    min_context_confidence: float = 0.35  # 
 
 
 class MultiTFIndicatorEngine(IndicatorEngine):
@@ -342,7 +363,21 @@ class MultiTFPositionSizer(PositionSizer):
             min_risk_reward_ratio=getattr(config, 'min_risk_reward_ratio', 1.0),
             momentum_analysis=getattr(config, 'momentum_analysis', True),
             mtf_divergence_detection=getattr(config, 'mtf_divergence_detection', True),
+            # ✅ Market Context parameters
+            use_market_context=getattr(config, 'use_market_context', True),
+            use_session_filtering=getattr(config, 'use_session_filtering', True),
+            require_tf_regime_match=getattr(config, 'require_tf_regime_match', True),
+            min_context_confidence=getattr(config, 'min_context_confidence', 0.35),
         )
+
+        # ✅ Market Context Engine initialization
+        self.market_engine = None
+        if MARKET_CONTEXT_AVAILABLE and self.ctx.use_market_context:
+            try:
+                self.market_engine = MarketContextEngine()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to initialize Market Context Engine for MultiTF: {e}")
 
     def plan(self, decision: SignalDecision, df: pd.DataFrame,
              current_price: float) -> PositionPlan:
@@ -350,7 +385,62 @@ class MultiTFPositionSizer(PositionSizer):
             return PositionPlan(side=None)
 
         entry_price = self.round_price(current_price)
-        stop_loss, take_profit = self.calculate_levels(df, entry_price, decision.signal)
+
+        # ✅ Market Context integration for MultiTF
+        market_ctx = None
+        if self.market_engine is not None:
+            try:
+                market_ctx = self.market_engine.get_context(
+                    df=df,
+                    current_price=current_price,
+                    signal_direction=decision.signal
+                )
+
+                # Check trading filters
+                can_trade, reason = market_ctx.should_trade()
+                if not can_trade:
+                    return PositionPlan(
+                        side=None,
+                        metadata={
+                            'reject_reason': f'Market context filter: {reason}',
+                            'context': market_ctx.to_dict()
+                        }
+                    )
+
+                # Check confidence
+                if market_ctx.risk_params.confidence < self.ctx.min_context_confidence:
+                    return PositionPlan(
+                        side=None,
+                        metadata={
+                            'reject_reason': 'Context confidence below threshold',
+                            'confidence': market_ctx.risk_params.confidence
+                        }
+                    )
+
+                # Multi-timeframe strategies benefit from regime matching
+                if self.ctx.require_tf_regime_match:
+                    regime = market_ctx.risk_params.market_regime.value
+                    if regime == 'sideways':
+                        # MultiTF works best in trending markets
+                        return PositionPlan(
+                            side=None,
+                            metadata={'reject_reason': 'MultiTF requires trending market, detected sideways'}
+                        )
+
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Market Context error in MultiTF: {e}")
+                market_ctx = None
+
+        # Calculate levels with Market Context awareness
+        if market_ctx and self.ctx.use_session_filtering:
+            atr_result = TechnicalIndicators.calculate_atr_safe(df, 14)
+            atr = atr_result.last_value if atr_result and atr_result.is_valid else current_price * 0.01
+
+            stop_loss = market_ctx.get_stop_loss(entry_price, atr, decision.signal)
+            take_profit = market_ctx.get_take_profit(entry_price, atr, decision.signal)
+        else:
+            stop_loss, take_profit = self.calculate_levels(df, entry_price, decision.signal)
 
         if decision.signal == 'BUY':
             risk = entry_price - stop_loss
@@ -372,7 +462,18 @@ class MultiTFPositionSizer(PositionSizer):
         metadata = {
             'risk_reward': actual_rr,
             'trade_amount': size,
+            # ✅ Market Context metadata
+            'market_context_used': market_ctx is not None,
         }
+
+        # Add detailed context info
+        if market_ctx:
+            metadata.update({
+                'session': market_ctx.session.name.value,
+                'market_regime': market_ctx.risk_params.market_regime.value,
+                'volatility_regime': market_ctx.risk_params.volatility_regime.value,
+                'context_confidence': market_ctx.risk_params.confidence,
+            })
 
         return PositionPlan(
             side=side,

@@ -18,6 +18,15 @@ from bot.strategy.pipeline.common import (
 )
 from bot.strategy.utils.indicators import TechnicalIndicators
 
+# ✅ NEW: Market Context Engine for Fibonacci + Liquidity confluence
+try:
+    from bot.market_context import MarketContextEngine
+    MARKET_CONTEXT_AVAILABLE = True
+except ImportError:
+    MARKET_CONTEXT_AVAILABLE = False
+    import logging
+    logging.getLogger(__name__).warning("Market Context Engine not available for Fibonacci RSI strategy")
+
 
 @dataclass
 class FibonacciContext:
@@ -46,6 +55,12 @@ class FibonacciContext:
     multi_tf_confirmation: bool
     use_fibonacci_targets: bool
     trend_strength_threshold: float
+
+    # ✅ NEW: Market Context parameters (Fibonacci + Liquidity confluence)
+    use_market_context: bool = True
+    use_liquidity_fib_confluence: bool = True  # Check if Fib levels align with liquidity
+    use_session_rsi_adjustment: bool = True  # Adjust RSI thresholds by session
+    min_context_confidence: float = 0.3  # Lower - Fib retracements work in any regime
 
 
 class FibonacciIndicatorEngine(IndicatorEngine):
@@ -321,7 +336,21 @@ class FibonacciPositionSizer(PositionSizer):
             multi_tf_confirmation=getattr(config, 'multi_timeframe_confirmation', True),
             use_fibonacci_targets=getattr(config, 'use_fibonacci_targets', True),
             trend_strength_threshold=getattr(config, 'trend_strength_threshold', 0.001),
+            # ✅ Market Context parameters
+            use_market_context=getattr(config, 'use_market_context', True),
+            use_liquidity_fib_confluence=getattr(config, 'use_liquidity_fib_confluence', True),
+            use_session_rsi_adjustment=getattr(config, 'use_session_rsi_adjustment', True),
+            min_context_confidence=getattr(config, 'min_context_confidence', 0.3),
         )
+
+        # ✅ Market Context Engine initialization
+        self.market_engine = None
+        if MARKET_CONTEXT_AVAILABLE and self.ctx.use_market_context:
+            try:
+                self.market_engine = MarketContextEngine()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to initialize Market Context Engine: {e}")
 
     def plan(self, decision: SignalDecision, df: pd.DataFrame,
              current_price: float) -> PositionPlan:
@@ -330,26 +359,101 @@ class FibonacciPositionSizer(PositionSizer):
 
         entry_price = self.round_price(current_price)
 
+        # ✅ Market Context integration with Fibonacci
+        market_ctx = None
+        if self.market_engine is not None:
+            try:
+                market_ctx = self.market_engine.get_context(
+                    df=df,
+                    current_price=current_price,
+                    signal_direction=decision.signal
+                )
+
+                # Check trading filters
+                can_trade, reason = market_ctx.should_trade()
+                if not can_trade:
+                    return PositionPlan(
+                        side=None,
+                        metadata={
+                            'reject_reason': f'Market context filter: {reason}',
+                            'context': market_ctx.to_dict()
+                        }
+                    )
+
+                # Check confidence
+                if market_ctx.risk_params.confidence < self.ctx.min_context_confidence:
+                    return PositionPlan(
+                        side=None,
+                        metadata={
+                            'reject_reason': 'Context confidence below threshold',
+                            'confidence': market_ctx.risk_params.confidence,
+                            'min_confidence': self.ctx.min_context_confidence
+                        }
+                    )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Market Context error in Fibonacci: {e}")
+                market_ctx = None
+
         atr_result = TechnicalIndicators.calculate_atr_safe(df, self.ctx.atr_period)
         atr_value = atr_result.value if atr_result and atr_result.is_valid else entry_price * 0.01
 
+        # Calculate stop/target with Market Context awareness
         if decision.signal == 'BUY':
-            stop_loss = entry_price - atr_value * self.ctx.atr_multiplier_sl
+            # Session-aware stop
+            if market_ctx and self.ctx.use_session_rsi_adjustment:
+                stop_loss = market_ctx.get_stop_loss(entry_price, atr_value, 'BUY')
+            else:
+                stop_loss = entry_price - atr_value * self.ctx.atr_multiplier_sl
+
+            # Fibonacci + Liquidity confluence for targets
             if self.ctx.use_fibonacci_targets:
                 fib_levels = decision.context.get('fib_levels', {})
-                take_profit = fib_levels.get('target_long', entry_price + atr_value * self.ctx.atr_multiplier_tp)
+                fib_target = fib_levels.get('target_long', entry_price + atr_value * self.ctx.atr_multiplier_tp)
+
+                # Check if Fib level aligns with liquidity
+                if market_ctx and self.ctx.use_liquidity_fib_confluence:
+                    liquidity_target = market_ctx.get_take_profit(entry_price, atr_value, 'BUY')
+                    # Use closer target for conservative exit
+                    take_profit = min(fib_target, liquidity_target)
+                else:
+                    take_profit = fib_target
             else:
-                take_profit = entry_price + atr_value * self.ctx.atr_multiplier_tp
+                # Use Market Context target if available
+                if market_ctx:
+                    take_profit = market_ctx.get_take_profit(entry_price, atr_value, 'BUY')
+                else:
+                    take_profit = entry_price + atr_value * self.ctx.atr_multiplier_tp
+
             side = 'Buy'
             risk = entry_price - stop_loss
             reward = take_profit - entry_price
         else:
-            stop_loss = entry_price + atr_value * self.ctx.atr_multiplier_sl
+            # Session-aware stop
+            if market_ctx and self.ctx.use_session_rsi_adjustment:
+                stop_loss = market_ctx.get_stop_loss(entry_price, atr_value, 'SELL')
+            else:
+                stop_loss = entry_price + atr_value * self.ctx.atr_multiplier_sl
+
+            # Fibonacci + Liquidity confluence for targets
             if self.ctx.use_fibonacci_targets:
                 fib_levels = decision.context.get('fib_levels', {})
-                take_profit = fib_levels.get('target_short', entry_price - atr_value * self.ctx.atr_multiplier_tp)
+                fib_target = fib_levels.get('target_short', entry_price - atr_value * self.ctx.atr_multiplier_tp)
+
+                # Check if Fib level aligns with liquidity
+                if market_ctx and self.ctx.use_liquidity_fib_confluence:
+                    liquidity_target = market_ctx.get_take_profit(entry_price, atr_value, 'SELL')
+                    # Use closer target for conservative exit
+                    take_profit = max(fib_target, liquidity_target)
+                else:
+                    take_profit = fib_target
             else:
-                take_profit = entry_price - atr_value * self.ctx.atr_multiplier_tp
+                # Use Market Context target if available
+                if market_ctx:
+                    take_profit = market_ctx.get_take_profit(entry_price, atr_value, 'SELL')
+                else:
+                    take_profit = entry_price - atr_value * self.ctx.atr_multiplier_tp
+
             side = 'Sell'
             risk = stop_loss - entry_price
             reward = entry_price - take_profit
@@ -366,7 +470,20 @@ class FibonacciPositionSizer(PositionSizer):
             'risk_reward': actual_rr,
             'trade_amount': size,
             'atr': atr_value,
+            # ✅ Market Context metadata
+            'market_context_used': market_ctx is not None,
         }
+
+        # Add detailed context info if available
+        if market_ctx:
+            metadata.update({
+                'session': market_ctx.session.name.value,
+                'market_regime': market_ctx.risk_params.market_regime.value,
+                'volatility_regime': market_ctx.risk_params.volatility_regime.value,
+                'stop_multiplier': market_ctx.risk_params.stop_loss_atr_mult,
+                'context_confidence': market_ctx.risk_params.confidence,
+                'liquidity_levels_count': len(market_ctx.liquidity.buy_side_liquidity) + len(market_ctx.liquidity.sell_side_liquidity),
+            })
 
         return PositionPlan(
             side=side,

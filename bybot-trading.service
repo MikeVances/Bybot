@@ -6,8 +6,12 @@ After=network.target
 Type=simple
 User=mikevance
 WorkingDirectory=/home/mikevance/bots/bybot
-ExecStart=/home/mikevance/bots/venv/bin/python3.12 -m bot.core.trader
+ExecStart=/bin/bash -c 'cd /home/mikevance/bots/bybot && source .venv/bin/activate && python main.py'
 Restart=always
+RestartSec=10
+Environment=BYBOT_API_KEY_PATH=/home/mikevance/secrets/bot2_api.key
+StandardOutput=journal
+StandardError=journal
 
 [Install]
-WantedBy=multi-user.target 
+WantedBy=multi-user.target

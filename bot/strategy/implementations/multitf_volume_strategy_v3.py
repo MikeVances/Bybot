@@ -126,6 +126,11 @@ class MultiTFVolumeStrategyV3(
         """
         self.update_market_regime(df)
 
+    def calculate_atr_safe(self, df, period: int = 14):
+        """Обратная совместимость: делегирует вызов TechnicalIndicators.calculate_atr_safe"""
+        from ..utils.indicators import TechnicalIndicators
+        return TechnicalIndicators.calculate_atr_safe(df, period)
+
     # =========================================================================
     # КАСТОМНЫЕ ПРЕСЕТЫ ДЛЯ FACTORY MIXIN
     # =========================================================================

@@ -54,6 +54,7 @@ class TelegramBot:
         self._bot_thread = None
         self._loop = None
         self._admin_id = ADMIN_CHAT_ID
+        self.trader = None  # Ссылка на trader для доступа к API
 
     def _is_authorized(self, update: Update) -> bool:
         if self._admin_id is None:
@@ -150,6 +151,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("all_strategies", self._all_strategies))
         self.app.add_handler(CommandHandler("api", self._cmd_api_health))
         self.app.add_handler(CommandHandler("blocks", self._cmd_blocks))
+        self.app.add_handler(CommandHandler("market_context", self._cmd_market_context))  # ✅ NEW
         self.app.add_handler(CallbackQueryHandler(self._on_menu_button))
         self.app.add_handler(CallbackQueryHandler(self._on_strategy_toggle))
         self.app.add_handler(CallbackQueryHandler(self._on_profit_button, pattern="^profit"))
@@ -445,8 +447,8 @@ class TelegramBot:
             strategies_with_signals = 0
             strategies_with_errors = 0
 
-            # Читаем логи v3 стратегий из full_system.log
-            main_log_file = "full_system.log"
+            # Читаем логи v3 стратегий из trading_bot.log или full_system.log
+            main_log_file = "trading_bot.log" if os.path.exists("trading_bot.log") else "full_system.log"
             strategy_activities = {}
 
             if os.path.exists(main_log_file):
@@ -773,16 +775,43 @@ class TelegramBot:
             return
         """Показать логи бота"""
         try:
-            # Проверяем разные файлы логов
-            log_files = [
-                "trading_bot.log",
-                "bot.log", 
-                "main.log"
-            ]
-            
             logs_text = "📝 Логи бота:\n\n"
             log_found = False
-            
+
+            # Сначала пробуем journalctl (текущие логи)
+            try:
+                result = subprocess.run(
+                    ['journalctl', '-u', 'bybot-trading.service', '-n', '10', '--no-pager'],
+                    capture_output=True, text=True, timeout=5
+                )
+
+                if result.returncode == 0 and result.stdout.strip():
+                    logs_text += "📊 Текущие логи (journalctl):\n"
+                    lines = result.stdout.strip().split('\n')
+                    for line in lines[-5:]:  # Последние 5 строк
+                        clean_line = line.strip()
+                        if clean_line and len(clean_line) > 10:
+                            # Обрезаем длинные строки и timestamp
+                            if len(clean_line) > 120:
+                                # Пропускаем timestamp (первые ~20 символов)
+                                if 'INFO:' in clean_line or 'ERROR:' in clean_line:
+                                    clean_line = clean_line.split('INFO:', 1)[-1] if 'INFO:' in clean_line else clean_line.split('ERROR:', 1)[-1]
+                                clean_line = clean_line[:100] + "..."
+                            logs_text += f"   {clean_line}\n"
+                    logs_text += "\n"
+                    log_found = True
+            except Exception as e:
+                # journalctl недоступен, пробуем файлы
+                pass
+
+            # Проверяем файлы логов
+            log_files = [
+                "full_system.log",
+                "trading_bot.log",
+                "bot.log",
+                "main.log"
+            ]
+
             for log_file in log_files:
                 if os.path.exists(log_file):
                     try:
@@ -797,17 +826,17 @@ class TelegramBot:
                                         # Обрезаем длинные строки
                                         if len(clean_line) > 100:
                                             clean_line = clean_line[:97] + "..."
-                                        # Не экранируем для обычного текста
                                         logs_text += f"   {clean_line}\n"
                                 logs_text += "\n"
                                 log_found = True
+                                break  # Нашли файл с данными, достаточно
                     except Exception as e:
-                        logs_text += f"📊 {log_file}: Ошибка чтения\n\n"
-                        log_found = True
-            
+                        continue
+
             if not log_found:
                 logs_text += "❌ Файлы логов не найдены\n"
-                logs_text += "📊 Проверьте: trading_bot.log, bot.log, main.log\n"
+                logs_text += "📊 Проверьте systemd journal:\n"
+                logs_text += "   journalctl -u bybot-trading.service\n"
             
             keyboard = [
                 [
@@ -1133,19 +1162,21 @@ class TelegramBot:
                 return
             
             # Читаем данные с правильными параметрами для CSV и обработкой ошибок
+            import csv
             try:
-                df = pd.read_csv(journal_file, quoting=1)  # QUOTE_ALL
+                df = pd.read_csv(journal_file, quoting=csv.QUOTE_ALL)  # Правильная обработка кавычек
             except pd.errors.ParserError as e:
-                print(f"CSV parsing error: {e}")
-                # Если CSV поврежден, попробуем прочитать то что можем
+                # Если CSV поврежден (несовпадение колонок), пропускаем плохие строки
                 try:
-                    df = pd.read_csv(journal_file, quoting=1, on_bad_lines='skip')
+                    df = pd.read_csv(journal_file, quoting=csv.QUOTE_ALL, on_bad_lines='skip')
                 except:
                     # Если все еще ошибка, используем базовый парсер
                     try:
                         df = pd.read_csv(journal_file, on_bad_lines='skip', engine='python')
-                    except:
-                        # Последняя попытка - создаем пустой DataFrame
+                    except Exception as parse_error:
+                        # Последняя попытка - создаем пустой DataFrame и логируем
+                        import logging
+                        logging.getLogger(__name__).error(f"CSV parsing error: {parse_error}")
                         df = pd.DataFrame()
             if df.empty:
                 keyboard = [[InlineKeyboardButton("🔙 НАЗАД", callback_data="menu_back")]]
@@ -1176,21 +1207,21 @@ class TelegramBot:
             recent_trades = len(df_recent)
             
             # Статистика по сигналам
-            buy_signals = len(df[df['signal'] == 'BUY'])
-            sell_signals = len(df[df['signal'] == 'SELL'])
+            buy_signals = len(df[df['side'] == 'BUY'])
+            sell_signals = len(df[df['side'] == 'SELL'])
             
             # Статистика по стратегиям
             strategy_stats = df['strategy'].value_counts()
             
             # Статистика по временным фреймам
-            tf_stats = df['tf'].value_counts()
+            tf_stats = df['timeframe'].value_counts()
             
             # Анализ последних 24 часов
             day_ago = datetime.now(timezone.utc) - timedelta(days=1)
             df_today = df[df['datetime'] >= day_ago]
             today_trades = len(df_today)
-            today_buy = len(df_today[df_today['signal'] == 'BUY'])
-            today_sell = len(df_today[df_today['signal'] == 'SELL'])
+            today_buy = len(df_today[df_today['side'] == 'BUY'])
+            today_sell = len(df_today[df_today['side'] == 'SELL'])
             
             # Формируем отчет
             charts_text = "📊 *Аналитика торговых результатов*\n\n"
@@ -1206,18 +1237,23 @@ class TelegramBot:
             # Статистика по стратегиям
             charts_text += "🎯 *По стратегиям:*\n"
             for strategy, count in strategy_stats.head(5).items():
-                strategy_buy = len(df[(df['strategy'] == strategy) & (df['signal'] == 'BUY')])
-                strategy_sell = len(df[(df['strategy'] == strategy) & (df['signal'] == 'SELL')])
+                strategy_buy = len(df[(df['strategy'] == strategy) & (df['side'] == 'BUY')])
+                strategy_sell = len(df[(df['strategy'] == strategy) & (df['side'] == 'SELL')])
                 charts_text += f"   📊 {strategy}: {count} сделок\n"
                 charts_text += f"      🟢 {strategy_buy} | 🔴 {strategy_sell}\n"
             
             # Статистика по таймфреймам
             charts_text += "\n⏰ *По таймфреймам:*\n"
-            for tf, count in tf_stats.head(5).items():
-                tf_buy = len(df[(df['tf'] == tf) & (df['signal'] == 'BUY')])
-                tf_sell = len(df[(df['tf'] == tf) & (df['signal'] == 'SELL')])
-                charts_text += f"   📊 {tf}: {count} сделок\n"
-                charts_text += f"      🟢 {tf_buy} | 🔴 {tf_sell}\n"
+            try:
+                for tf, count in tf_stats.head(5).items():
+                    tf_buy = len(df[(df['timeframe'] == tf) & (df['side'] == 'BUY')])
+                    tf_sell = len(df[(df['timeframe'] == tf) & (df['side'] == 'SELL')])
+                    charts_text += f"   📊 {tf}: {count} сделок\n"
+                    charts_text += f"      🟢 {tf_buy} | 🔴 {tf_sell}\n"
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Ошибка анализа таймфреймов: {e}")
+                charts_text += f"   ⚠️ Ошибка анализа таймфреймов\n"
             
             # Активность за последние 24 часа
             charts_text += "\n🔥 *Активность за 24 часа:*\n"
@@ -1235,8 +1271,8 @@ class TelegramBot:
             # Информация о ценах
             if not df.empty:
                 avg_entry = df['entry_price'].mean()
-                avg_sl = df['stop_loss'].mean()
-                avg_tp = df['take_profit'].mean()
+                avg_sl = df['sl_price'].mean()
+                avg_tp = df['tp_price'].mean()
                 
                 charts_text += "\n💰 *Средние цены:*\n"
                 charts_text += f"   💰 Вход: ${avg_entry:.2f}\n"
@@ -1548,8 +1584,11 @@ class TelegramBot:
                     profit_text += "❌ Нет данных о сделках\n"
                     profit_text += "📊 Файл trades.csv пуст"
                 else:
-                    # Конвертируем datetime
-                    df['datetime'] = pd.to_datetime(df['datetime'])
+                    # Конвертируем datetime с fallback на timestamp
+                    if 'datetime' not in df.columns and 'timestamp' in df.columns:
+                        df['datetime'] = pd.to_datetime(df['timestamp'], errors='coerce')
+                    else:
+                        df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
                     
                     # Фильтруем по периодам
                     from datetime import timezone
@@ -1850,8 +1889,9 @@ class TelegramBot:
             from datetime import datetime, timedelta, timezone
 
             # Читаем журнал сделок
+            import csv
             try:
-                df = pd.read_csv('data/trade_journal.csv')
+                df = pd.read_csv('data/trade_journal.csv', quoting=csv.QUOTE_ALL)
                 if df.empty:
                     raise ValueError("Журнал сделок пуст")
 
@@ -1873,14 +1913,14 @@ class TelegramBot:
             # Основная статистика
             total_trades = len(df)
             recent_trades = len(df_recent)
-            buy_signals = len(df[df['signal'] == 'BUY'])
-            sell_signals = len(df[df['signal'] == 'SELL'])
+            buy_signals = len(df[df['side'] == 'BUY'])
+            sell_signals = len(df[df['side'] == 'SELL'])
 
             # Анализ по стратегиям
             strategy_stats = df['strategy'].value_counts().head(5)
 
             # Анализ по временным фреймам
-            tf_stats = df['tf'].value_counts().head(3)
+            tf_stats = df['timeframe'].value_counts().head(3)
 
             # Анализ последних 24 часов
             day_ago = datetime.now(timezone.utc) - timedelta(days=1)
@@ -1988,20 +2028,21 @@ class TelegramBot:
             if os.path.exists('trading_bot.log'):
                 log_files_size += os.path.getsize('trading_bot.log')
 
-            # Проверяем API
+            # Проверяем API - используем глобальный API если доступен
             api_status = "🟢 Активен"
             try:
-                from bot.exchange.bybit_api_v5 import BybitAPIV5
-                from config import get_api_credentials
-                api_key, api_secret = get_api_credentials()
-                api = BybitAPIV5(api_key, api_secret, testnet=True)
-
-                # Проверяем подключение
-                server_time = api.get_server_time()
-                if server_time.get('retCode') == 0:
-                    api_status = "🟢 Подключен"
+                # Пробуем использовать глобальный API если он есть
+                if hasattr(self, 'trader') and self.trader and hasattr(self.trader, 'api'):
+                    # Используем API из trader
+                    api = self.trader.api
+                    server_time = api.get_server_time()
+                    if server_time.get('retCode') == 0:
+                        api_status = "🟢 Подключен"
+                    else:
+                        api_status = f"🟡 Ошибка: {server_time.get('retMsg', 'Unknown')}"
                 else:
-                    api_status = f"🟡 Ошибка: {server_time.get('retMsg', 'Unknown')}"
+                    # API недоступен, но это не критично
+                    api_status = "⚪ Не проверен"
             except Exception as e:
                 api_status = f"🔴 Недоступен: {str(e)[:30]}..."
 
@@ -2238,6 +2279,127 @@ class TelegramBot:
         except Exception as e:
             await update.message.reply_text(f"❌ Ошибка получения статуса блокировок: {e}")
 
+    async def _cmd_market_context(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """🧠 Показать Market Context для текущего рынка"""
+        if not await self._ensure_authorized(update, context):
+            return
+
+        try:
+            # Import Market Context Engine
+            try:
+                from bot.market_context import MarketContextEngine
+            except ImportError:
+                await update.message.reply_text(
+                    "❌ Market Context Engine не установлен\n\n"
+                    "Установите: bot/market_context/"
+                )
+                return
+
+            # Get market data
+            from bot.exchange.api_adapter import create_trading_bot_adapter
+            api = create_trading_bot_adapter(
+                symbol="BTCUSDT",
+                api_key=BYBIT_API_KEY,
+                api_secret=BYBIT_API_SECRET,
+                testnet=USE_TESTNET
+            )
+
+            # Fetch recent candles
+            klines = api.get_klines("BTCUSDT", "15", limit=200)
+            if not klines or 'result' not in klines or 'list' not in klines['result']:
+                await update.message.reply_text("❌ Не удалось получить данные рынка")
+                return
+
+            # Convert to DataFrame
+            import pandas as pd
+
+            candles = klines['result']['list']
+            df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
+
+            # Convert types
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            df['timestamp'] = pd.to_datetime(pd.to_numeric(df['timestamp']), unit='ms')
+            df = df.sort_values('timestamp').reset_index(drop=True)
+
+            current_price = float(df['close'].iloc[-1])
+
+            # Initialize Market Context Engine
+            engine = MarketContextEngine()
+
+            # Get context for BUY signal
+            market_ctx = engine.get_context(
+                df=df,
+                current_price=current_price,
+                signal_direction='BUY'
+            )
+
+            # Format message
+            session = market_ctx.session
+            risk = market_ctx.risk_params
+            liq = market_ctx.liquidity
+
+            message = f"""🧠 MARKET CONTEXT АНАЛИЗ
+
+💰 BTCUSDT: ${current_price:,.0f}
+
+📅 ТОРГОВАЯ СЕССИЯ
+├─ Текущая: {session.name.value.upper()}
+├─ Время: {session.start_hour:02d}:00 - {session.end_hour:02d}:00 UTC
+├─ Волатильность: {session.avg_volatility_pct:.2f}%
+├─ Stop Multiplier: {session.stop_multiplier:.2f}x ATR
+└─ Volume Factor: {session.volume_multiplier:.1f}x
+
+📊 РЫНОЧНЫЙ РЕЖИМ
+├─ Режим: {risk.market_regime.value}
+├─ Волатильность: {risk.volatility_regime.value}
+├─ Уверенность: {risk.confidence * 100:.0f}%
+├─ Рекомендуемый R/R: {risk.risk_reward_ratio:.1f}
+├─ Stop Loss: {risk.stop_loss_atr_mult:.2f}x ATR
+└─ Position Size: {risk.position_size_pct:.1f}%
+
+💧 ЛИКВИДНОСТЬ (TOP 3)"""
+
+            # Top liquidity levels
+            top_levels = liq.get_strongest_levels(3)
+            if top_levels:
+                for i, level in enumerate(top_levels, 1):
+                    distance = ((level.price - current_price) / current_price) * 100
+                    direction = "↑" if distance > 0 else "↓"
+                    message += f"\n{i}. ${level.price:,.0f} ({direction} {abs(distance):.2f}%)"
+                    message += f"\n   Тип: {level.type.value}"
+                    message += f"\n   Сила: {level.strength:.2f}"
+            else:
+                message += "\n   Нет значимых уровней"
+
+            # Trading recommendation
+            can_trade, reason = market_ctx.should_trade()
+            message += f"\n\n{'✅' if can_trade else '❌'} ТОРГОВЛЯ"
+            if can_trade:
+                message += f"\n└─ Разрешена (confidence {risk.confidence:.2f})"
+            else:
+                message += f"\n└─ Запрещена: {reason}"
+
+            # Example stops/targets
+            atr = (df['high'].rolling(14).max().iloc[-1] - df['low'].rolling(14).min().iloc[-1]) / 14.0
+
+            stop_buy = market_ctx.get_stop_loss(current_price, atr, 'BUY')
+            target_buy = market_ctx.get_take_profit(current_price, atr, 'BUY')
+
+            message += f"\n\n🎯 ПРИМЕР СДЕЛКИ (BUY)"
+            message += f"\nEntry: ${current_price:,.0f}"
+            message += f"\nStop: ${stop_buy:,.0f} (-{((current_price - stop_buy) / current_price * 100):.2f}%)"
+            message += f"\nTarget: ${target_buy:,.0f} (+{((target_buy - current_price) / current_price * 100):.2f}%)"
+            actual_rr = (target_buy - current_price) / (current_price - stop_buy)
+            message += f"\nR/R: {actual_rr:.2f}"
+
+            await update.message.reply_text(message)
+
+        except Exception as e:
+            logging.error(f"Error in market_context command: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Ошибка: {str(e)}")
+
     def _run_in_thread(self):
         """Запуск бота в отдельном потоке для избежания конфликтов event loop"""
         import threading
@@ -2264,8 +2426,8 @@ class TelegramBot:
                 print(f"[DEBUG] Токен длина: {len(self.token) if self.token else 'None'}")
                 print(f"[DEBUG] Обработчики зарегистрированы: {len(self.app.handlers)}")
 
-                # Используем простой run вместо run_until_complete
-                asyncio.run(self.app.run_polling(drop_pending_updates=False, stop_signals=None))
+                # Запускаем polling в уже настроенном loop
+                loop.run_until_complete(self.app.run_polling(drop_pending_updates=False, stop_signals=None))
                 print("[DEBUG] Polling завершен")
 
             except Exception as e:
@@ -2305,4 +2467,28 @@ class TelegramBot:
 
 if __name__ == "__main__":
     from config import TELEGRAM_TOKEN
-    TelegramBot(TELEGRAM_TOKEN).start()
+    import time
+    import signal
+    import sys
+
+    # Создаем и запускаем бота
+    bot = TelegramBot(TELEGRAM_TOKEN)
+    bot.start()
+
+    # Обработчик сигналов для корректного завершения
+    def signal_handler(sig, frame):
+        print("\n[DEBUG] Получен сигнал завершения, останавливаем бот...")
+        bot.stop()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    print("[DEBUG] Главный поток ожидает завершения...")
+    # Блокируем главный поток, чтобы процесс не завершился
+    try:
+        while bot._is_running:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("[DEBUG] KeyboardInterrupt, завершаем...")
+        bot.stop()

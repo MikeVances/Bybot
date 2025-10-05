@@ -18,6 +18,15 @@ from bot.strategy.pipeline.common import (
 )
 from bot.strategy.utils.indicators import TechnicalIndicators
 
+# ✅ NEW: Market Context Engine for Range Trading (Sideways detection CRITICAL!)
+try:
+    from bot.market_context import MarketContextEngine
+    MARKET_CONTEXT_AVAILABLE = True
+except ImportError:
+    MARKET_CONTEXT_AVAILABLE = False
+    import logging
+    logging.getLogger(__name__).warning("Market Context Engine not available for Range Trading strategy")
+
 
 @dataclass
 class RangeContext:
@@ -28,6 +37,12 @@ class RangeContext:
     confluence_required: int
     min_risk_reward_ratio: float
     trade_amount: float
+
+    # ✅ NEW: Market Context parameters (Range Trading - SIDEWAYS ONLY!)
+    use_market_context: bool = True
+    require_sideways_regime: bool = True  # CRITICAL: Only trade if sideways
+    use_liquidity_range_bounds: bool = True  # Use liquidity levels for range boundaries
+    min_context_confidence: float = 0.4  # Higher - need clear sideways detection
 
 
 def _infer_trade_amount(config: Any) -> float:
@@ -281,8 +296,22 @@ class RangePositionSizer(PositionSizer):
             confluence_required=getattr(config, "confluence_required", 1),
             min_risk_reward_ratio=getattr(config, "min_risk_reward_ratio", 1.0),
             trade_amount=_infer_trade_amount(config),
+            # ✅ Market Context parameters (Range Trading specific!)
+            use_market_context=getattr(config, "use_market_context", True),
+            require_sideways_regime=getattr(config, "require_sideways_regime", True),
+            use_liquidity_range_bounds=getattr(config, "use_liquidity_range_bounds", True),
+            min_context_confidence=getattr(config, "min_context_confidence", 0.4),
         )
         self._min_trade_size = max(0.001, getattr(config, 'min_trade_amount', 0.0) or 0.0)
+
+        # ✅ Market Context Engine initialization
+        self.market_engine = None
+        if MARKET_CONTEXT_AVAILABLE and self.ctx.use_market_context:
+            try:
+                self.market_engine = MarketContextEngine()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to initialize Market Context Engine for Range: {e}")
 
     def plan(
         self,
@@ -294,7 +323,82 @@ class RangePositionSizer(PositionSizer):
             return PositionPlan(side=None)
 
         entry_price = self.round_price(current_price)
-        stop_loss, take_profit = self._calculate_range_levels(df, entry_price, decision.signal)
+
+        # ✅ Market Context integration for Range Trading (CRITICAL: needs SIDEWAYS!)
+        market_ctx = None
+        if self.market_engine is not None:
+            try:
+                market_ctx = self.market_engine.get_context(
+                    df=df,
+                    current_price=current_price,
+                    signal_direction=decision.signal
+                )
+
+                # Check trading filters
+                can_trade, reason = market_ctx.should_trade()
+                if not can_trade:
+                    return PositionPlan(
+                        side=None,
+                        metadata={
+                            'reject_reason': f'Market context filter: {reason}',
+                            'context': market_ctx.to_dict()
+                        }
+                    )
+
+                # Check confidence
+                if market_ctx.risk_params.confidence < self.ctx.min_context_confidence:
+                    return PositionPlan(
+                        side=None,
+                        metadata={
+                            'reject_reason': 'Context confidence below threshold',
+                            'confidence': market_ctx.risk_params.confidence
+                        }
+                    )
+
+                # 🚨 CRITICAL: Range trading ONLY works in sideways markets!
+                if self.ctx.require_sideways_regime:
+                    regime = market_ctx.risk_params.market_regime.value
+                    if regime != 'sideways':
+                        # Range strategy should avoid trending markets
+                        return PositionPlan(
+                            side=None,
+                            metadata={
+                                'reject_reason': f'Range strategy requires sideways market, detected {regime}',
+                                'market_regime': regime
+                            }
+                        )
+
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Market Context error in Range: {e}")
+                market_ctx = None
+
+        # Calculate levels with Range + Liquidity awareness
+        if market_ctx and self.ctx.use_liquidity_range_bounds:
+            # Use liquidity levels as range boundaries (superior to BB/VWAP!)
+            atr_result = TechnicalIndicators.calculate_atr_safe(df, 14)
+            atr = atr_result.last_value if atr_result and atr_result.is_valid else current_price * 0.01
+
+            # Get Market Context levels (already respects session & liquidity)
+            stop_loss = market_ctx.get_stop_loss(entry_price, atr, decision.signal)
+            take_profit = market_ctx.get_take_profit(entry_price, atr, decision.signal)
+
+            # For range trading, targets are tighter (use closest liquidity level)
+            if decision.signal == "BUY":
+                # Find nearest sell-side liquidity (resistance) for take profit
+                sell_levels = market_ctx.liquidity.sell_side_liquidity
+                if sell_levels:
+                    closest_resistance = min([l.price for l in sell_levels if l.price > entry_price], default=take_profit)
+                    take_profit = min(take_profit, closest_resistance)
+            else:
+                # Find nearest buy-side liquidity (support) for take profit
+                buy_levels = market_ctx.liquidity.buy_side_liquidity
+                if buy_levels:
+                    closest_support = max([l.price for l in buy_levels if l.price < entry_price], default=take_profit)
+                    take_profit = max(take_profit, closest_support)
+        else:
+            # Legacy calculation
+            stop_loss, take_profit = self._calculate_range_levels(df, entry_price, decision.signal)
 
         if decision.signal == "BUY":
             risk = entry_price - stop_loss
@@ -320,11 +424,22 @@ class RangePositionSizer(PositionSizer):
             "risk_reward": actual_rr,
             "trade_amount": size,
             "decision_context": decision.context,
+            # ✅ Market Context metadata
+            "market_context_used": market_ctx is not None,
         }
         if size > self.ctx.trade_amount:
             metadata['min_size_applied'] = True
             metadata['original_trade_amount'] = self.ctx.trade_amount
 
+        # Add detailed context info
+        if market_ctx:
+            metadata.update({
+                'session': market_ctx.session.name.value,
+                'market_regime': market_ctx.risk_params.market_regime.value,
+                'volatility_regime': market_ctx.risk_params.volatility_regime.value,
+                'context_confidence': market_ctx.risk_params.confidence,
+                'liquidity_boundaries_used': self.ctx.use_liquidity_range_bounds,
+            })
 
         return PositionPlan(
             side=side,

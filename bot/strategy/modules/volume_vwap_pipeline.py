@@ -17,6 +17,16 @@ from bot.strategy.pipeline.common import (
     PositionPlan,
 )
 from bot.strategy.utils.indicators import TechnicalIndicators
+from bot.strategy.utils.volume_seasonality import adjust_volume_for_seasonality
+
+# ✅ NEW: Market Context Engine for intelligent trading
+try:
+    from bot.market_context import MarketContextEngine
+    MARKET_CONTEXT_AVAILABLE = True
+except ImportError:
+    MARKET_CONTEXT_AVAILABLE = False
+    import logging
+    logging.getLogger(__name__).warning("Market Context Engine not available, using legacy logic")
 
 
 @dataclass
@@ -36,6 +46,12 @@ class VolumeContext:
     trade_amount: float
     min_trade_amount: float
 
+    # ✅ NEW: Market Context parameters
+    use_market_context: bool = True
+    use_liquidity_targets: bool = True
+    use_session_stops: bool = True
+    min_context_confidence: float = 0.3
+
 
 class VolumeVwapIndicatorEngine(IndicatorEngine):
     def __init__(self, config: Any, base_indicator_fn):
@@ -51,9 +67,27 @@ class VolumeVwapIndicatorEngine(IndicatorEngine):
         if 'volume' not in df.columns:
             return StrategyIndicators(data=indicators)
 
+        # 🚀 ПРОФЕССИОНАЛЬНОЕ УЛУЧШЕНИЕ: Seasonal Volume Adjustment
+        # Корректируем объемы под intraday/weekly паттерны
+        use_seasonality = getattr(self.config, 'use_volume_seasonality', True)
+
+        if use_seasonality and len(df) >= 100:  # Минимум данных для калибровки
+            try:
+                df_adjusted = df.copy()
+                df_adjusted['volume_adjusted'] = adjust_volume_for_seasonality(df, lookback_days=30)
+                volume_series = df_adjusted['volume_adjusted']
+                indicators['seasonality_enabled'] = True
+            except Exception as e:
+                # Fallback на обычные объемы если ошибка
+                volume_series = df['volume']
+                indicators['seasonality_enabled'] = False
+        else:
+            volume_series = df['volume']
+            indicators['seasonality_enabled'] = False
+
         vol_sma_period = getattr(self.config, 'volume_sma_period', 20)
-        indicators['vol_sma'] = df['volume'].rolling(vol_sma_period, min_periods=1).mean()
-        indicators['volume_ratio'] = df['volume'] / indicators['vol_sma']
+        indicators['vol_sma'] = volume_series.rolling(vol_sma_period, min_periods=1).mean()
+        indicators['volume_ratio'] = volume_series / indicators['vol_sma']
         indicators['volume_spike'] = indicators['volume_ratio'] > getattr(self.config, 'volume_multiplier', 2.0)
 
         vol_trend_window = getattr(self.config, 'volume_trend_window', 10)
@@ -262,7 +296,21 @@ class VolumeVwapPositionSizer(PositionSizer):
             min_risk_reward_ratio=getattr(config, 'min_risk_reward_ratio', 0.8),
             trade_amount=getattr(config, 'trade_amount', 0.001),
             min_trade_amount=getattr(config, 'min_trade_amount', getattr(config, 'trade_amount', 0.001)),
+            # ✅ NEW: Market Context parameters
+            use_market_context=getattr(config, 'use_market_context', True),
+            use_liquidity_targets=getattr(config, 'use_liquidity_targets', True),
+            use_session_stops=getattr(config, 'use_session_stops', True),
+            min_context_confidence=getattr(config, 'min_context_confidence', 0.3),
         )
+
+        # ✅ NEW: Market Context Engine initialization
+        self.market_engine = None
+        if MARKET_CONTEXT_AVAILABLE and self.ctx.use_market_context:
+            try:
+                self.market_engine = MarketContextEngine()
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to initialize Market Context Engine: {e}")
 
     def plan(self, decision: SignalDecision, df: pd.DataFrame,
              current_price: float) -> PositionPlan:
@@ -270,7 +318,58 @@ class VolumeVwapPositionSizer(PositionSizer):
             return PositionPlan(side=None)
 
         entry_price = self.round_price(current_price)
-        stop_loss, take_profit = self._calculate_levels(df, entry_price, decision.signal)
+
+        # ✅ NEW: Market Context-aware position sizing
+        market_ctx = None
+        if self.market_engine is not None:
+            try:
+                market_ctx = self.market_engine.get_context(
+                    df=df,
+                    current_price=current_price,
+                    signal_direction=decision.signal
+                )
+
+                # Check if trading is allowed in current context
+                can_trade, reason = market_ctx.should_trade()
+                if not can_trade:
+                    return PositionPlan(
+                        side=None,
+                        metadata={
+                            'reject_reason': f'Market context filter: {reason}',
+                            'context': market_ctx.to_dict()
+                        }
+                    )
+
+                # Check confidence threshold
+                if market_ctx.risk_params.confidence < self.ctx.min_context_confidence:
+                    return PositionPlan(
+                        side=None,
+                        metadata={
+                            'reject_reason': 'Context confidence below threshold',
+                            'confidence': market_ctx.risk_params.confidence,
+                            'min_confidence': self.ctx.min_context_confidence
+                        }
+                    )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Market Context error, using legacy logic: {e}")
+                market_ctx = None
+
+        # Calculate ATR for stop/target calculation
+        atr_result = TechnicalIndicators.calculate_atr_safe(df, 14)
+        atr = atr_result.last_value if atr_result and atr_result.is_valid else current_price * 0.01
+
+        # ✅ Context-aware stops and targets (with graceful fallback)
+        if market_ctx is not None and self.ctx.use_session_stops:
+            stop_loss = market_ctx.get_stop_loss(entry_price, atr, decision.signal)
+            if self.ctx.use_liquidity_targets:
+                take_profit = market_ctx.get_take_profit(entry_price, atr, decision.signal)
+            else:
+                # Use context stop but legacy target
+                stop_loss_raw, take_profit = self._calculate_levels(df, entry_price, decision.signal)
+        else:
+            # Legacy calculation
+            stop_loss, take_profit = self._calculate_levels(df, entry_price, decision.signal)
 
         if decision.signal == 'BUY':
             risk = entry_price - stop_loss
@@ -282,15 +381,43 @@ class VolumeVwapPositionSizer(PositionSizer):
             side = 'Sell'
 
         actual_rr = reward / risk if risk > 0 else 0.0
-        if actual_rr < self.ctx.min_risk_reward_ratio:
+
+        # ✅ Adaptive R/R threshold
+        min_rr = self.ctx.min_risk_reward_ratio
+        if market_ctx is not None:
+            # Use context's recommended R/R as baseline
+            min_rr = max(min_rr, market_ctx.risk_params.risk_reward_ratio * 0.6)
+
+        if actual_rr < min_rr:
             return PositionPlan(side=None, metadata={'reject_reason': 'R/R below threshold', 'risk_reward': actual_rr})
 
-        size = max(self.ctx.trade_amount, self.ctx.min_trade_amount)
+        # ✅ Adaptive position sizing
+        base_size = max(self.ctx.trade_amount, self.ctx.min_trade_amount)
+        if market_ctx is not None:
+            size = market_ctx.get_position_size(base_size)
+        else:
+            size = base_size
+
         metadata = {
             'risk_reward': actual_rr,
             'trade_amount': size,
             'decision_context': decision.context,
         }
+
+        # ✅ Add Market Context metadata
+        if market_ctx is not None:
+            metadata.update({
+                'market_regime': market_ctx.risk_params.market_regime.value,
+                'session': market_ctx.session.name.value,
+                'confidence': market_ctx.risk_params.confidence,
+                'stop_multiplier': market_ctx.risk_params.stop_loss_atr_mult,
+                'volatility_regime': market_ctx.risk_params.volatility_regime.value,
+                'liquidity_levels': len(market_ctx.liquidity.buy_side_liquidity) + len(market_ctx.liquidity.sell_side_liquidity),
+                'market_context_used': True
+            })
+        else:
+            metadata['market_context_used'] = False
+
         if size > self.ctx.trade_amount:
             metadata['min_size_applied'] = True
             metadata['original_trade_amount'] = self.ctx.trade_amount

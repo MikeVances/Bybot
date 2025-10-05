@@ -191,11 +191,15 @@ class RiskManager:
         entry_price = signal.get('entry_price', 0)
         from config import get_strategy_config
         config = get_strategy_config(strategy_name)
-        trade_amount = config.get('trade_amount', 0.001)
-        min_trade_amount = config.get('min_trade_amount', trade_amount)
 
-        position_value = entry_price * trade_amount
-        min_position_value = entry_price * min_trade_amount
+        # ✅ ИСПРАВЛЕНО: trade_amount теперь в USDT (не в BTC!)
+        # Например: trade_amount=100 означает позицию на $100 USDT
+        trade_amount_usd = config.get('trade_amount', 100.0)  # По умолчанию $100
+        min_trade_amount_usd = config.get('min_trade_amount', trade_amount_usd)
+
+        # position_value уже в USD (т.к. trade_amount_usd в USD)
+        position_value = trade_amount_usd
+        min_position_value = min_trade_amount_usd
         max_position_value = current_balance * limits.max_position_size_pct / 100
 
         # Если текущий лимит ниже минимально допустимого объема, поднимаем его
@@ -537,7 +541,166 @@ class RiskManager:
         if strategy_name in self.blocked_strategies:
             self.blocked_strategies.remove(strategy_name)
             self.logger.info(f"Стратегия {strategy_name} разблокирована")
-    
+
+    def reconcile_positions(self, api_client, telegram_bot=None) -> Dict[str, any]:
+        """
+        КРИТИЧЕСКАЯ ФУНКЦИЯ: Синхронизация локальных позиций с биржей
+
+        Проверяет расхождения между локальным состоянием и реальными позициями на бирже.
+        Исправляет orphaned positions и обнаруживает неучтенные позиции.
+
+        Args:
+            api_client: Клиент API биржи с методом get_positions()
+            telegram_bot: Опциональный Telegram бот для уведомлений
+
+        Returns:
+            Dict с результатами reconciliation:
+            {
+                'success': bool,
+                'orphaned_positions': int,  # Позиции на бирже, которых нет локально
+                'missing_positions': int,   # Локальные позиции, которых нет на бирже
+                'synced_positions': int,    # Успешно синхронизированные позиции
+                'errors': List[str]
+            }
+        """
+        result = {
+            'success': False,
+            'orphaned_positions': 0,
+            'missing_positions': 0,
+            'synced_positions': 0,
+            'errors': []
+        }
+
+        try:
+            # 1. Получаем реальные позиции с биржи
+            exchange_response = api_client.get_positions()
+
+            if not exchange_response or exchange_response.get('retCode') != 0:
+                error_msg = f"Ошибка получения позиций с биржи: {exchange_response}"
+                self.logger.error(error_msg)
+                result['errors'].append(error_msg)
+                return result
+
+            # Парсим позиции с биржи
+            exchange_positions = {}
+            positions_list = exchange_response.get('result', {}).get('list', [])
+
+            for pos in positions_list:
+                size = float(pos.get('size', 0))
+                if size == 0:
+                    continue  # Пропускаем закрытые позиции
+
+                symbol = pos.get('symbol')
+                side = pos.get('side')  # Buy или Sell
+                position_key = f"{symbol}_{side}"
+
+                exchange_positions[position_key] = {
+                    'symbol': symbol,
+                    'side': side,
+                    'size': size,
+                    'entry_price': float(pos.get('avgPrice', 0)),
+                    'unrealized_pnl': float(pos.get('unrealisedPnl', 0)),
+                    'leverage': float(pos.get('leverage', 1))
+                }
+
+            # 2. Сравниваем с локальным состоянием
+            local_position_keys = set(self.open_positions.keys())
+            exchange_position_keys = set(exchange_positions.keys())
+
+            # 3. Находим orphaned positions (есть на бирже, нет локально)
+            orphaned_keys = []
+            for key in exchange_position_keys:
+                # Проверяем, есть ли эта позиция в любой локальной стратегии
+                found = False
+                for local_key in local_position_keys:
+                    if key in local_key:  # Ключ содержит symbol_side
+                        found = True
+                        break
+
+                if not found:
+                    orphaned_keys.append(key)
+                    result['orphaned_positions'] += 1
+
+                    exch_pos = exchange_positions[key]
+                    warning_msg = (f"⚠️ ORPHANED POSITION обнаружена на бирже: {exch_pos['symbol']} "
+                                  f"{exch_pos['side']} размер={exch_pos['size']}, "
+                                  f"P&L=${exch_pos['unrealized_pnl']:.2f}")
+                    self.logger.warning(warning_msg)
+
+                    # Добавляем в локальное состояние
+                    position_risk = PositionRisk(
+                        strategy='orphaned_unknown',
+                        symbol=exch_pos['symbol'],
+                        side=exch_pos['side'],
+                        size=exch_pos['size'],
+                        entry_price=exch_pos['entry_price'],
+                        current_price=exch_pos['entry_price'],  # Обновится позже
+                        unrealized_pnl=exch_pos['unrealized_pnl'],
+                        risk_pct=0.0,
+                        stop_loss=0.0,
+                        take_profit=0.0
+                    )
+                    self.open_positions[f"orphaned_{key}"] = position_risk
+
+                    # Уведомление в Telegram
+                    if telegram_bot:
+                        telegram_bot.send_admin_message(
+                            f"🚨 ВНИМАНИЕ: Обнаружена неучтенная позиция на бирже!\n\n"
+                            f"{warning_msg}\n\n"
+                            f"Позиция добавлена в систему мониторинга."
+                        )
+
+            # 4. Находим missing positions (есть локально, нет на бирже)
+            for local_key, local_pos in list(self.open_positions.items()):
+                # Формируем ключ для сравнения
+                compare_key = f"{local_pos.symbol}_{local_pos.side}"
+
+                if compare_key not in exchange_position_keys:
+                    result['missing_positions'] += 1
+
+                    warning_msg = (f"⚠️ MISSING POSITION: локальная позиция {local_key} "
+                                  f"не найдена на бирже. Возможно закрыта вручную.")
+                    self.logger.warning(warning_msg)
+
+                    # Удаляем из локального состояния
+                    self.open_positions.pop(local_key)
+
+                    # Уведомление в Telegram
+                    if telegram_bot:
+                        telegram_bot.send_admin_message(
+                            f"⚠️ Локальная позиция {local_key} не найдена на бирже.\n"
+                            f"Позиция удалена из системы."
+                        )
+
+            # 5. Синхронизируем существующие позиции
+            for local_key, local_pos in self.open_positions.items():
+                compare_key = f"{local_pos.symbol}_{local_pos.side}"
+
+                if compare_key in exchange_positions:
+                    exch_pos = exchange_positions[compare_key]
+
+                    # Обновляем данные из биржи
+                    local_pos.size = exch_pos['size']
+                    local_pos.unrealized_pnl = exch_pos['unrealized_pnl']
+                    # entry_price не обновляем - он должен быть зафиксирован
+
+                    result['synced_positions'] += 1
+
+            result['success'] = True
+            self.logger.info(
+                f"✅ Position reconciliation завершен: "
+                f"orphaned={result['orphaned_positions']}, "
+                f"missing={result['missing_positions']}, "
+                f"synced={result['synced_positions']}"
+            )
+
+        except Exception as e:
+            error_msg = f"Критическая ошибка в position reconciliation: {e}"
+            self.logger.error(error_msg, exc_info=True)
+            result['errors'].append(error_msg)
+
+        return result
+
     def cleanup_old_data(self, days_to_keep: int = 30):
         """Очистка старых данных"""
         cutoff_date = datetime.now().date() - timedelta(days=days_to_keep)

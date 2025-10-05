@@ -591,6 +591,12 @@ def run_trading_with_risk_management(
         if strategy_apis:
             global_emergency_stop.start_monitoring(strategy_apis)
             main_logger.info("🚨 Система экстренной остановки запущена")
+
+            # Устанавливаем ссылку на API в telegram_bot для проверки статуса
+            if telegram_bot and strategy_apis:
+                first_api = next(iter(strategy_apis.values()))
+                telegram_bot.trader = type('obj', (object,), {'api': first_api})()
+                main_logger.info("✅ API установлен в Telegram бот для проверки статуса")
         else:
             main_logger.error("❌ Не удалось подготовить API клиенты для стратегий")
             return
@@ -599,15 +605,23 @@ def run_trading_with_risk_management(
         global_circuit_breaker.start_monitoring()
         main_logger.info("🔌 Circuit Breaker запущен")
         
-        # Инициализация стратегий
+        # Инициализация стратегий И СОЗДАНИЕ ЭКЗЕМПЛЯРОВ (один раз!)
+        strategy_instances = {}  # Словарь для хранения созданных экземпляров стратегий
+
         for strategy_name, adapter in strategy_apis.items():
             try:
                 config = strategy_configs[strategy_name]
                 strategy_states[strategy_name] = BotState()
                 strategy_loggers[strategy_name] = setup_strategy_logger(strategy_name)
-                
-                main_logger.info(f"✅ Инициализирована стратегия {strategy_name}: {config['description']}")
-                
+
+                # Создаем экземпляр стратегии ОДИН РАЗ
+                strategy_factory = load_strategy(strategy_name)
+                if strategy_factory:
+                    strategy_instances[strategy_name] = strategy_factory()
+                    main_logger.info(f"✅ Стратегия {strategy_name} создана и инициализирована: {config['description']}")
+                else:
+                    main_logger.error(f"❌ Не удалось загрузить фабрику стратегии {strategy_name}")
+
             except Exception as e:
                 main_logger.error(f"❌ Ошибка инициализации стратегии {strategy_name}: {e}")
                 continue
@@ -816,20 +830,17 @@ def run_trading_with_risk_management(
                 for strategy_name in active_strategies:
                     if shutdown_event.is_set():
                         break
-                        
+
                     api = strategy_apis[strategy_name]
                     state = strategy_states[strategy_name]
                     logger = strategy_loggers[strategy_name]
-                    
+
                     try:
-                        # Загружаем стратегию
-                        strategy_factory = load_strategy(strategy_name)
-                        if strategy_factory is None:
-                            logger.error(f"❌ Не удалось загрузить стратегию {strategy_name}")
+                        # Используем СУЩЕСТВУЮЩИЙ экземпляр стратегии (не создаем новый!)
+                        strategy = strategy_instances.get(strategy_name)
+                        if strategy is None:
+                            logger.error(f"❌ Экземпляр стратегии {strategy_name} не найден")
                             continue
-                        
-                        # Создаем экземпляр стратегии
-                        strategy = strategy_factory()
 
                         # Проверяем, это стратегия v2.0 или старая
                         if hasattr(strategy, '__class__') and hasattr(strategy.__class__, '__bases__'):
@@ -902,9 +913,16 @@ def run_trading_with_risk_management(
                             # КРИТИЧЕСКАЯ ПРОВЕРКА БАЛАНСА (добавлено)
                             from bot.core.balance_validator import validate_trade_balance
 
-                            trade_amount = float(signal.get('amount', 0.001))
+                            # ✅ Получаем trade_amount в USDT из конфига или сигнала
+                            config = get_strategy_config(strategy_name)
+                            trade_amount_usd = config.get('trade_amount', 100.0)
+
+                            # Если сигнал содержит 'amount', используем его (тоже в USD)
+                            if 'amount' in signal:
+                                trade_amount_usd = float(signal.get('amount', 100.0))
+
                             balance_ok, balance_reason = validate_trade_balance(
-                                api, trade_amount, SYMBOL, leverage=1.0
+                                api, trade_amount_usd, SYMBOL, leverage=1.0
                             )
 
                             if not balance_ok:
@@ -926,37 +944,46 @@ def run_trading_with_risk_management(
                             if state.in_position:
                                 logger.info(f"⏸️ Уже в позиции {state.position_side}, пропускаем")
                                 continue
-                            
-                            # Получаем параметры сделки
-                            config = get_strategy_config(strategy_name)
-                            trade_amount = config.get('trade_amount', 0.001)
-                            
+
+                            # trade_amount_usd уже получен из config выше (строка 918)
+
                             side = signal_type
                             entry_price = signal.get('entry_price', current_price)
                             stop_loss = signal.get('stop_loss')
                             take_profit = signal.get('take_profit')
-                            
+
+                            # ✅ КРИТИЧНО: Конвертируем USD → BTC для биржи
+                            # Биржа ожидает количество в базовой валюте (BTC), НЕ в USD!
+                            if entry_price and entry_price > 0:
+                                btc_quantity = trade_amount_usd / entry_price
+                            else:
+                                btc_quantity = trade_amount_usd / current_price
+
+                            # Округляем до допустимой точности биржи (обычно 0.001 для BTC)
+                            btc_quantity = round(btc_quantity, 3)
+
                             logger.info(f"🎯 Выполняем {side} по цене ${entry_price}")
-                            main_logger.info(f"Стратегия {strategy_name}: {side} сделка по ${entry_price}")
-                            
+                            logger.info(f"💰 Позиция: ${trade_amount_usd:.2f} USDT = {btc_quantity} BTC")
+                            main_logger.info(f"Стратегия {strategy_name}: {side} сделка по ${entry_price}, размер {btc_quantity} BTC")
+
                             # Создаем ордер (конвертируем side в формат API)
                             api_side = 'Buy' if side == 'BUY' else 'Sell' if side == 'SELL' else side
-                            
+
                             # Определяем тип ордера: Limit если стратегия указала конкретную цену
                             order_type = "Limit" if entry_price and entry_price > 0 else "Market"
                             price_param = entry_price if order_type == "Limit" else None
-                            
-                            logger.info(f"🎯 Создаем {order_type} ордер по цене ${entry_price}")
-                            
+
+                            logger.info(f"🎯 Создаем {order_type} ордер на {btc_quantity} BTC по цене ${entry_price}")
+
                             # 🛡️ БЕЗОПАСНОЕ СОЗДАНИЕ ОРДЕРА ЧЕРЕЗ OrderManager
                             try:
                                 order_manager = get_order_manager()
-                                
+
                                 order_request = OrderRequest(
                                     symbol=SYMBOL,
                                     side=api_side,
                                     order_type=order_type,
-                                    qty=trade_amount,
+                                    qty=btc_quantity,  # ✅ Теперь в BTC!
                                     price=price_param,
                                     stop_loss=stop_loss,
                                     take_profit=take_profit,
@@ -985,11 +1012,11 @@ def run_trading_with_risk_management(
                                 bot_state.set_position(
                                     symbol=SYMBOL,
                                     side=api_side,
-                                    size=trade_amount,
+                                    size=btc_quantity,  # ✅ Теперь BTC количество
                                     entry_price=entry_price,
                                     avg_price=entry_price
                                 )
-                                
+
                                 # Обновляем локальное состояние для совместимости
                                 state.in_position = True
                                 state.position_side = side
@@ -997,7 +1024,7 @@ def run_trading_with_risk_management(
                                 state.entry_time = datetime.now(timezone.utc)
                                 state.stop_loss = stop_loss
                                 state.take_profit = take_profit
-                                state.position_size = trade_amount
+                                state.position_size = btc_quantity  # ✅ BTC количество
                                 
                                 # Устанавливаем стопы отдельно, если они не были установлены с ордером
                                 if stop_loss or take_profit:
@@ -1040,7 +1067,7 @@ def run_trading_with_risk_management(
                                         comment = signal.get('comment', '')
                                         send_position_notification(
                                             telegram_bot, side, strategy_name, entry_price,
-                                            stop_loss, take_profit, trade_amount,
+                                            stop_loss, take_profit, btc_quantity,  # ✅ BTC количество для Telegram
                                             signal_strength, comment
                                         )
                                     except Exception as e:
@@ -1050,7 +1077,7 @@ def run_trading_with_risk_management(
                                 api.log_trade(
                                     symbol=SYMBOL,
                                     side=side,
-                                    qty=trade_amount,
+                                    qty=btc_quantity,  # ✅ BTC количество для логирования
                                     entry_price=entry_price,
                                     exit_price=0,
                                     pnl=0,

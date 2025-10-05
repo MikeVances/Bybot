@@ -57,14 +57,20 @@ class BalanceValidator:
 
             # Проверка 1: Достаточно ли свободного баланса
             balance_after_trade = available_balance - required_margin
-            # Используем USDT баланс для резерва, а не весь эквити (который включает BTC)
-            usdt_balance = balance_info.get('usdt_balance', available_balance)
-            min_required_balance = usdt_balance * self.min_balance_reserve
 
-            logger.debug(f"💰 Проверка баланса: после_сделки={balance_after_trade:.2f}, мин_резерв={min_required_balance:.2f}")
+            # ИСПРАВЛЕНО: Резерв рассчитывается от available_balance, а не от usdt_balance
+            # usdt_balance может содержать весь equity включая BTC, что приводит к слишком большому резерву
+            min_required_balance = available_balance * self.min_balance_reserve
 
+            logger.debug(f"💰 Проверка баланса: требуется={required_margin:.2f}, доступно={available_balance:.2f}, после_сделки={balance_after_trade:.2f}, мин_резерв={min_required_balance:.2f}")
+
+            # Проверяем что после сделки останется хотя бы минимальный резерв
             if balance_after_trade < min_required_balance:
-                return False, f"❌ Недостаточно баланса. Требуется: {required_margin:.4f}, доступно: {available_balance:.4f}", balance_info
+                return False, f"❌ Недостаточно баланса. Требуется: {required_margin:.4f} + резерв {min_required_balance:.4f}, доступно: {available_balance:.4f}", balance_info
+
+            # Дополнительная проверка: минимум требуемого маржина должен быть доступен
+            if available_balance < required_margin:
+                return False, f"❌ Недостаточно средств для маржина. Требуется: {required_margin:.4f}, доступно: {available_balance:.4f}", balance_info
 
             # Проверка 2: Критический уровень баланса
             if total_equity < (balance_info.get('initial_equity', total_equity) * self.emergency_balance_threshold):
@@ -135,26 +141,35 @@ class BalanceValidator:
             return None
 
     def _calculate_required_margin(self, trade_amount: float, leverage: float, symbol: str) -> float:
-        """Рассчитать необходимый маржин для позиции"""
-        try:
-            # Для получения цены нам нужен API, но пока используем приблизительную
-            # TODO: передавать API объект для получения реальной цены
-            current_price = 114500.0  # Примерная цена BTC на сегодня
-            logger.debug(f"💰 Расчет маржина: amount={trade_amount}, price=${current_price:.2f}, leverage={leverage}")
+        """Рассчитать необходимый маржин для позиции
 
-            position_value = trade_amount * current_price
-            required_margin = position_value / max(leverage, 1.0)
+        Args:
+            trade_amount: Размер позиции в USDT (например 100 = $100 позиция)
+            leverage: Плечо (1.0 = без плеча)
+            symbol: Торговая пара
+
+        Returns:
+            Требуемый маржин в USDT с буфером на комиссии
+        """
+        try:
+            # ✅ ИСПРАВЛЕНО: trade_amount теперь ВСЕГДА в USDT!
+            # Примеры: 100 = позиция на $100, 500 = позиция на $500
+
+            position_value_usd = trade_amount  # Уже в USD
+
+            # Рассчитываем необходимый маржин с учетом плеча
+            required_margin = position_value_usd / max(leverage, 1.0)
 
             # Добавляем буфер 10% на комиссии и проскальзывание
             final_margin = required_margin * 1.1
 
-            logger.debug(f"💰 Позиция: ${position_value:.2f}, маржин: ${required_margin:.2f}, итого: ${final_margin:.2f}")
+            logger.debug(f"💰 Расчет маржина: pos_value=${position_value_usd:.2f} USDT, leverage={leverage}x, маржин=${required_margin:.2f}, итого=${final_margin:.2f}")
             return final_margin
 
         except Exception as e:
             logger.error(f"❌ Ошибка расчета маржина: {e}")
-            # Используем консервативную оценку с примерной ценой $100k
-            return trade_amount * 100000 * 1.1
+            # Консервативный fallback: используем trade_amount как есть + буфер
+            return trade_amount * 1.1
 
     def _get_current_price(self, api, symbol: str) -> float:
         """Получить текущую цену символа через доступный OHLCV эндпоинт"""
